@@ -50,10 +50,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # the oldest resolved entries are pruned once this limit is exceeded.
     # Pending entries are never pruned. None disables rotation entirely.
     "memory_log_max_entries": None,
-    # LLM settings
-    "llm_provider": "openai",
-    "deep_think_llm": "gpt-5.4",
-    "quick_think_llm": "gpt-5.4-mini",
+    # LLM settings — env vars override the defaults so users can switch
+    # providers without editing code (e.g. LLM_PROVIDER=bedrock in .env).
+    "llm_provider": os.environ.get("LLM_PROVIDER", "openai"),
+    "deep_think_llm": os.environ.get("DEEP_THINK_LLM", "gpt-5.4"),
+    "quick_think_llm": os.environ.get("QUICK_THINK_LLM", "gpt-5.4-mini"),
     # When None, each provider's client falls back to its own default endpoint
     # (api.openai.com for OpenAI, generativelanguage.googleapis.com for Gemini, ...).
     # The CLI overrides this per provider when the user picks one. Keeping a

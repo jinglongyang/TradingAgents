@@ -112,10 +112,12 @@ def select_tickers(
     return selected
 
 
-def build_config(deep_model: str, quick_model: str) -> dict[str, Any]:
+def build_config(deep_model: str | None, quick_model: str | None) -> dict[str, Any]:
     config = DEFAULT_CONFIG.copy()
-    config["deep_think_llm"] = deep_model
-    config["quick_think_llm"] = quick_model
+    if deep_model:
+        config["deep_think_llm"] = deep_model
+    if quick_model:
+        config["quick_think_llm"] = quick_model
     config["max_debate_rounds"] = 1
     config["data_vendors"] = {
         "core_stock_apis": "yfinance",
@@ -260,8 +262,10 @@ def main() -> int:
     parser.add_argument("--all", action="store_true", help="Run all tickers above --min-pct.")
     parser.add_argument("--min-pct", type=float, default=1.0, help="Minimum portfolio share (in %%) to analyze when --all. Default 1.0.")
     parser.add_argument("--trade-date", default="2026-05-08", help="Trading date (YYYY-MM-DD). Default 2026-05-08 (last trading day before today).")
-    parser.add_argument("--deep-model", default="gpt-5.4-mini")
-    parser.add_argument("--quick-model", default="gpt-5.4-mini")
+    parser.add_argument("--deep-model", default=None,
+                        help="Override DEFAULT_CONFIG['deep_think_llm'] (which reads DEEP_THINK_LLM env).")
+    parser.add_argument("--quick-model", default=None,
+                        help="Override DEFAULT_CONFIG['quick_think_llm'] (which reads QUICK_THINK_LLM env).")
     parser.add_argument("--out-dir", type=Path, default=Path("outputs"))
     args = parser.parse_args()
 

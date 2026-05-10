@@ -242,11 +242,37 @@ class PortfolioDecision(BaseModel):
     )
     price_target: Optional[float] = Field(
         default=None,
-        description="Optional target price in the instrument's quote currency.",
+        description=(
+            "Required when rating is Buy/Overweight/Underweight/Sell — the "
+            "12-month target price in the instrument's quote currency. For Buy/"
+            "Overweight, this is the upside target; for Underweight/Sell, the "
+            "level at which the rating would be revisited (often the fair-value "
+            "anchor). Leave null only for Hold when no directional target applies."
+        ),
+    )
+    entry_zone: Optional[str] = Field(
+        default=None,
+        description=(
+            "Required when rating is Buy/Overweight/Add or Underweight/Reduce/Sell — "
+            "the price range at which the action should be executed, e.g. '420-435' "
+            "(buy on dips into this zone) or '510-525' (sell on bounces into this "
+            "zone). Be specific about whether it is a buy-the-dip or sell-the-rip "
+            "zone in the rationale."
+        ),
+    )
+    stop_loss: Optional[float] = Field(
+        default=None,
+        description=(
+            "Required when rating is Buy/Overweight — the price level below which "
+            "the bullish thesis is invalidated and the position should be exited "
+            "or trimmed. Typically the most recent significant support, the 200-day "
+            "moving average, or a percentage drawdown from entry. Leave null for "
+            "Hold and for Sell ratings (which already imply exit)."
+        ),
     )
     time_horizon: Optional[str] = Field(
         default=None,
-        description="Optional recommended holding period, e.g. '3-6 months'.",
+        description="Required: recommended holding period, e.g. '3-6 months', '6-12 months'.",
     )
     account_actions: Optional[List[AccountActionItem]] = Field(
         default=None,
@@ -277,7 +303,11 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
         f"**Investment Thesis**: {decision.investment_thesis}",
     ]
     if decision.price_target is not None:
-        parts.extend(["", f"**Price Target**: {decision.price_target}"])
+        parts.extend(["", f"**Price Target (12m)**: ${decision.price_target}"])
+    if decision.entry_zone:
+        parts.extend(["", f"**Entry/Exit Zone**: {decision.entry_zone}"])
+    if decision.stop_loss is not None:
+        parts.extend(["", f"**Stop Loss**: ${decision.stop_loss}"])
     if decision.time_horizon:
         parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
     if decision.account_actions:

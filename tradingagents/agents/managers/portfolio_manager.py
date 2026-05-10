@@ -74,6 +74,13 @@ def create_portfolio_manager(llm):
 - **Underweight**: Reduce exposure, take partial profits
 - **Sell**: Exit position or avoid entry
 
+**Required Price Levels** (any non-Hold rating MUST include all three):
+- **price_target**: 12-month target price (upside for Buy/Overweight; the fair-value level that would trigger a re-rating for Underweight/Sell)
+- **entry_zone**: specific price range to execute (e.g. "$420-435 on dips" for Buy, "$510-525 on bounces" for Sell). Anchor to support/resistance, moving averages, or recent ranges from the technical analyst's report.
+- **stop_loss**: only for Buy/Overweight — the level below which the bullish thesis is invalidated. Use the 200-day SMA, recent swing low, or a defined percentage drawdown.
+
+For Hold, all three may be null but you should still mention the level at which your stance would change in the executive_summary.
+
 **Context:**
 - Research Manager's investment plan: **{research_plan}**
 - Trader's transaction proposal: **{trader_plan}**

@@ -1,0 +1,110 @@
+"""SQLite connection + schema initialization.
+
+Schema is intentionally small — three tables that together answer:
+1. "What did I hold on date X?" (positions_snapshot)
+2. "What did the PM recommend?" (decisions)
+3. "What did I actually trade?" (executions)
+"""
+
+from __future__ import annotations
+
+import os
+import sqlite3
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterator
+
+
+DEFAULT_DB_PATH = Path(
+    os.environ.get(
+        "TRADINGAGENTS_PORTFOLIO_DB",
+        Path.home() / ".tradingagents" / "portfolio.db",
+    )
+)
+
+
+SCHEMA = """
+-- Snapshot of holdings imported from a broker CSV. Multiple snapshots per
+-- ticker (one per import_date). Source of truth = broker; DB = audit trail.
+CREATE TABLE IF NOT EXISTS positions_snapshot (
+    snapshot_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    import_date      TEXT NOT NULL,            -- YYYY-MM-DD when CSV was imported
+    statement_date   TEXT,                     -- YYYY-MM-DD on the broker statement
+    account_id       TEXT NOT NULL,
+    account_name     TEXT NOT NULL,
+    account_type     TEXT NOT NULL,            -- Roth/TaxDeferred/Taxable/ChildEdu/Unknown
+    symbol           TEXT NOT NULL,
+    quantity         REAL NOT NULL,
+    last_price       REAL,
+    current_value    REAL NOT NULL,
+    cost_basis_total REAL,
+    avg_cost         REAL,
+    UNIQUE (import_date, account_id, symbol)
+);
+CREATE INDEX IF NOT EXISTS idx_snapshot_symbol ON positions_snapshot (symbol);
+CREATE INDEX IF NOT EXISTS idx_snapshot_date   ON positions_snapshot (import_date);
+
+-- PM decisions, one row per (ticker, trade_date). The full final markdown
+-- and the per-account JSON live here so we can reconcile against
+-- executions later.
+CREATE TABLE IF NOT EXISTS decisions (
+    decision_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_date       TEXT NOT NULL,
+    symbol           TEXT NOT NULL,
+    rating           TEXT NOT NULL,            -- Buy/Overweight/Hold/Underweight/Sell
+    final_decision   TEXT NOT NULL,            -- full markdown
+    account_actions  TEXT,                     -- JSON list, may be NULL
+    raw_return       REAL,                     -- filled by Reflector later
+    alpha_return     REAL,
+    holding_days     INTEGER,
+    reflection       TEXT,                     -- 2-4 sentences from Reflector
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (trade_date, symbol)
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_symbol ON decisions (symbol);
+
+-- Manually recorded executions — what the user actually traded after
+-- seeing PM's advice. decision_id is optional (some trades aren't
+-- driven by the system).
+CREATE TABLE IF NOT EXISTS executions (
+    execution_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_date       TEXT NOT NULL,
+    account_id       TEXT NOT NULL,
+    account_name     TEXT NOT NULL,
+    symbol           TEXT NOT NULL,
+    action           TEXT NOT NULL,            -- BUY / SELL
+    shares           REAL NOT NULL,
+    price            REAL NOT NULL,
+    decision_id      INTEGER REFERENCES decisions(decision_id),
+    note             TEXT,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_exec_symbol ON executions (symbol);
+CREATE INDEX IF NOT EXISTS idx_exec_date   ON executions (trade_date);
+"""
+
+
+@contextmanager
+def connect(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
+    """Open a connection with row factory + foreign keys enabled."""
+    path = Path(db_path) if db_path else DEFAULT_DB_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def init_db(db_path: Path | None = None) -> Path:
+    """Create tables if missing. Idempotent."""
+    path = Path(db_path) if db_path else DEFAULT_DB_PATH
+    with connect(path) as conn:
+        conn.executescript(SCHEMA)
+    return path

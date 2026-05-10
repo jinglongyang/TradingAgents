@@ -132,7 +132,9 @@ def parse_fidelity_csv(path: str | Path) -> list[Position]:
     ``Position``.
     """
     positions: list[Position] = []
-    with open(path, encoding="utf-8") as f:
+    # utf-8-sig strips Fidelity's UTF-8 BOM that would otherwise mangle the
+    # first column header into "﻿Account Number".
+    with open(path, encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         for row in reader:
             symbol = (row.get("Symbol") or "").strip()
