@@ -22,10 +22,10 @@ class NormalizedAzureChatOpenAI(AzureChatOpenAI):
 class AzureOpenAIClient(BaseLLMClient):
     """Client for Azure OpenAI deployments.
 
-    Requires environment variables:
-        AZURE_OPENAI_API_KEY: API key
+    Required environment variables (any one of the API key names works):
+        AZURE_OPENAI_API_KEY or MS_OPENAI_KEY: API key
         AZURE_OPENAI_ENDPOINT: Endpoint URL (e.g. https://<resource>.openai.azure.com/)
-        AZURE_OPENAI_DEPLOYMENT_NAME: Deployment name
+        AZURE_OPENAI_DEPLOYMENT_NAME (optional): Deployment name; defaults to the model name
         OPENAI_API_VERSION: API version (e.g. 2025-03-01-preview)
     """
 
@@ -41,8 +41,18 @@ class AzureOpenAIClient(BaseLLMClient):
             "azure_deployment": os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", self.model),
         }
 
+        # Allow MS_OPENAI_KEY as an alternative name so users can keep their
+        # company-specific .env naming without duplicating secrets.
+        api_key = (
+            self.kwargs.get("api_key")
+            or os.environ.get("AZURE_OPENAI_API_KEY")
+            or os.environ.get("MS_OPENAI_KEY")
+        )
+        if api_key:
+            llm_kwargs["api_key"] = api_key
+
         for key in _PASSTHROUGH_KWARGS:
-            if key in self.kwargs:
+            if key in self.kwargs and key not in llm_kwargs:
                 llm_kwargs[key] = self.kwargs[key]
 
         return NormalizedAzureChatOpenAI(**llm_kwargs)
