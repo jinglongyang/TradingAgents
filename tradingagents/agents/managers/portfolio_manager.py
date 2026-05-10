@@ -10,6 +10,8 @@ back gracefully to free-text generation.
 
 from __future__ import annotations
 
+import os
+
 from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
@@ -40,9 +42,15 @@ def create_portfolio_manager(llm):
         )
 
         holdings_context = state.get("holdings_context", "")
+        user_tax_context = os.environ.get("USER_TAX_CONTEXT", "").strip()
         if holdings_context:
+            tax_user_block = (
+                f"\n**User-Specific Tax Context (must factor into account_actions):**\n{user_tax_context}\n"
+                if user_tax_context
+                else ""
+            )
             holdings_block = (
-                f"\n---\n\n{holdings_context}\n\n"
+                f"\n---\n\n{holdings_context}\n{tax_user_block}\n"
                 "Because the user already holds this position across multiple accounts, "
                 "you MUST also populate `account_actions` with one entry per account "
                 "listed above. Use these tax-aware rules:\n"
@@ -55,6 +63,11 @@ def create_portfolio_manager(llm):
                 "Taxable but Roth/TaxDeferred has cash to buy the same exposure.\n"
                 "5. **ChildEdu** accounts: only adjust when the rating is decisive and "
                 "the long horizon supports it; respect 529 rebalancing limits.\n"
+                "6. When the User-Specific Tax Context flags imminent material life events "
+                "(home purchase, refinancing, large planned expense), DEFER large taxable "
+                "gain realizations to a later year — only proceed with TLH (loss harvests) "
+                "and tax-deferred account rebalancing this year. Note this in each affected "
+                "rationale so the user can confirm timing.\n"
                 "Per-account actions must collectively be consistent with the top-level "
                 "rating you choose.\n"
             )

@@ -18,6 +18,8 @@ from tradingagents.agents.utils.news_data_tools import (
     get_insider_transactions,
     get_global_news,
     web_search_news,
+    get_sec_filings,
+    get_institutional_holders,
 )
 
 

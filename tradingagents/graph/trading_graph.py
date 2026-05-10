@@ -38,6 +38,8 @@ from tradingagents.agents.utils.agent_utils import (
     get_insider_transactions,
     get_global_news,
     web_search_news,
+    get_sec_filings,
+    get_institutional_holders,
 )
 
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
@@ -181,6 +183,8 @@ class TradingAgentsGraph:
                     # Live web news for events the structured APIs miss
                     # (recent 8-K filings, credit rating actions, partnerships)
                     web_search_news,
+                    # SEC EDGAR — authoritative same-day disclosure
+                    get_sec_filings,
                 ]
             ),
             "fundamentals": ToolNode(
@@ -193,6 +197,9 @@ class TradingAgentsGraph:
                     # Allow fundamentals analyst to verify recent investments,
                     # ratings actions, and material capital structure events.
                     web_search_news,
+                    # SEC filings + institutional ownership for smart-money signal
+                    get_sec_filings,
+                    get_institutional_holders,
                 ]
             ),
         }

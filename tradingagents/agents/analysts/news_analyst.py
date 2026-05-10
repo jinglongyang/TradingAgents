@@ -4,6 +4,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_global_news,
     get_language_instruction,
     get_news,
+    get_sec_filings,
     web_search_news,
 )
 from tradingagents.dataflows.config import get_config
@@ -18,18 +19,20 @@ def create_news_analyst(llm):
             get_news,
             get_global_news,
             web_search_news,
+            get_sec_filings,
         ]
 
         system_message = (
-            "You are a news researcher tasked with analyzing recent news and trends over the past week. Please write a comprehensive report of the current state of the world that is relevant for trading and macroeconomics."
-            " Available tools (use them in this order):"
-            " (1) get_news(ticker, start_date, end_date) — structured ticker-specific news from the configured vendor."
-            " (2) get_global_news(curr_date, look_back_days, limit) — macroeconomic news."
-            " (3) web_search_news(query, max_results) — LIVE web search via Tavily, covers events the structured APIs miss"
-            " (recent 8-K filings, credit rating actions like S&P/Moody's upgrades, large strategic investments,"
-            " partnership announcements, late-breaking earnings reactions). USE THIS WHENEVER the structured tools return"
-            " sparse or stale results, or whenever you suspect a recent material event."
-            " Anchor every factual claim to a tool call result; never fabricate dates, dollar amounts, or rating actions."
+            "You are a news researcher tasked with analyzing recent news and trends. Write a comprehensive report on the state of the world relevant to this ticker and to macroeconomics."
+            " MANDATORY TOOL SEQUENCE — execute in this order, do not skip:"
+            " (1) FIRST call get_sec_filings(ticker, forms=\"8-K\", days_back=90) to retrieve the authoritative material-event disclosures the company has filed directly with the SEC."
+            " Item descriptions (e.g. 'Material Definitive Agreement', 'Results of Operations', 'Departure of Officers') tell you exactly what happened. The URLs link to the filings."
+            " (2) SECOND call web_search_news(query=\"<TICKER> latest earnings <YEAR>\") for the market reaction and analyst commentary on those events."
+            " (3) THIRD call web_search_news(query=\"<TICKER> strategic investment partnership financing rating <YEAR>\") to specifically surface large equity investments,"
+            " term loan facilities, credit rating actions (S&P, Moody's, Fitch upgrades/downgrades), and partnership announcements."
+            " (4) ONLY AFTER the above, call get_news / get_global_news for additional structured context."
+            " Anchor every factual claim — every dollar figure, every date, every rating action — to a tool call result."
+            " Do NOT fabricate numbers or events. If web_search or SEC returns nothing on a topic, say so explicitly."
             " Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
             + get_language_instruction()

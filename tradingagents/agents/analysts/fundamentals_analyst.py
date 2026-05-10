@@ -6,7 +6,9 @@ from tradingagents.agents.utils.agent_utils import (
     get_fundamentals,
     get_income_statement,
     get_insider_transactions,
+    get_institutional_holders,
     get_language_instruction,
+    get_sec_filings,
     web_search_news,
 )
 from tradingagents.dataflows.config import get_config
@@ -23,13 +25,20 @@ def create_fundamentals_analyst(llm):
             get_cashflow,
             get_income_statement,
             web_search_news,
+            get_sec_filings,
+            get_institutional_holders,
         ]
 
         system_message = (
-            "You are a researcher tasked with analyzing fundamental information over the past week about a company. Please write a comprehensive report of the company's fundamental information such as financial documents, company profile, basic company financials, and company financial history to gain a full view of the company's fundamental information to inform traders. Make sure to include as much detail as possible. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
-            + " Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."
-            + " Use the available tools: `get_fundamentals` for comprehensive company analysis, `get_balance_sheet`, `get_cashflow`, and `get_income_statement` for specific financial statements."
-            + " Also use `web_search_news(query)` to verify recent material events that the structured statements may not yet reflect: large strategic investments (e.g. Nvidia funding rounds), credit rating changes (S&P, Moody's, Fitch), 8-K filings, analyst-day announcements, partnership deals, or earnings-day reactions. When the structured statements show concerning trends (high leverage, negative FCF), use web_search to check whether recent events (new term loans at investment-grade, equity injections, capacity sales) materially change the picture before drawing conclusions. Anchor every factual claim to a tool call result."
+            "You are a researcher tasked with analyzing fundamental information about a company. Write a comprehensive report covering financial statements, company profile, capital structure, and institutional ownership."
+            " MANDATORY TOOL SEQUENCE:"
+            " (1) FIRST call get_sec_filings(ticker, forms=\"10-Q,8-K\", days_back=120) to pull the most recent quarterly report and any material-event filings."
+            " (2) SECOND call get_institutional_holders(ticker) to see which funds own the stock, their position sizes, and quarter-over-quarter changes — this is the smart-money signal."
+            " (3) THIRD call get_fundamentals, get_balance_sheet, get_cashflow, get_income_statement for the structured financial picture."
+            " (4) FOURTH call web_search_news(query=\"<TICKER> strategic investment partnership financing rating <YEAR>\") to verify any recent events the structured statements have not yet reflected (term loans, equity injections, rating actions)."
+            " When the structured statements show concerning trends (high leverage, negative FCF), web_search and SEC filings often reveal mitigating events. Conversely, strong-looking statements may have material risks disclosed in recent 8-K filings."
+            " Anchor every factual claim to a tool call result. Do NOT fabricate dollar figures or dates."
+            " Make sure to append a Markdown table at the end of the report to organize key points."
             + get_language_instruction(),
         )
 

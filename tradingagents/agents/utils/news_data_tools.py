@@ -112,3 +112,66 @@ def web_search_news(
             out.append(f"   {snippet}")
         out.append("")
     return "\n".join(out)
+
+
+@tool
+def get_sec_filings(
+    ticker: Annotated[str, "Ticker symbol"],
+    forms: Annotated[str, "Comma-separated form types, e.g. '8-K' or '8-K,10-Q,13D'"] = "8-K",
+    days_back: Annotated[int, "How many days back to look"] = 90,
+) -> str:
+    """
+    Fetch recent SEC filings directly from EDGAR. This is the AUTHORITATIVE
+    source for material events — same-day disclosure, beats every news API.
+
+    Use for:
+    - 8-K: large investments, executive changes, credit rating reactions,
+      partnership agreements, debt issuances, material impairments
+    - 10-Q / 10-K: quarterly / annual financials
+    - 13D / 13G: large beneficial owner filings (>5% holders)
+
+    Returns a markdown table of filings with date, form, item descriptions
+    (in plain English for 8-K), and direct SEC URLs.
+    """
+    from tradingagents.dataflows.sec_edgar import (
+        describe_8k_items,
+        get_recent_filings,
+    )
+
+    form_list = [f.strip().upper() for f in forms.split(",") if f.strip()]
+    try:
+        filings = get_recent_filings(ticker, forms=form_list, days_back=days_back)
+    except Exception as e:  # noqa: BLE001
+        return f"[get_sec_filings error: {e}]"
+    if not filings:
+        return f"No {','.join(form_list)} filings for {ticker} in the past {days_back} days."
+
+    lines = [
+        f"## SEC Filings for {ticker} (last {days_back} days)",
+        "",
+        "| Date | Form | Items / Description | Link |",
+        "|---|---|---|---|",
+    ]
+    for f in filings:
+        desc = describe_8k_items(f["items"]) if f["form"] == "8-K" else (f["items"] or "—")
+        lines.append(f"| {f['date']} | {f['form']} | {desc} | [view]({f['url']}) |")
+    return "\n".join(lines)
+
+
+@tool
+def get_institutional_holders(
+    ticker: Annotated[str, "Ticker symbol"],
+) -> str:
+    """
+    Top institutional holders aggregated from 13F-HR filings (via yfinance).
+    Shows shares, value, % of float, and quarter-over-quarter % change.
+
+    Use this to gauge "smart money" conviction: large QoQ increases by
+    well-known funds (Renaissance, Tiger Global, Berkshire, Bridgewater)
+    are bullish signals; broad reductions are bearish. Note 13F data is
+    45 days delayed, so it is structural context, not real-time signal.
+    """
+    from tradingagents.dataflows.sec_edgar import (
+        get_institutional_holders_via_yfinance,
+    )
+    return get_institutional_holders_via_yfinance(ticker)
