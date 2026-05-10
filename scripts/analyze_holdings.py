@@ -1,0 +1,316 @@
+"""Analyze a Fidelity portfolio export with the multi-agent trading graph.
+
+Usage examples:
+  # Dry-run: analyze a single ticker (validate prompt + output format)
+  uv run python scripts/analyze_holdings.py --ticker NVDA
+
+  # Full run: analyze all positions >= 1% of portfolio
+  uv run python scripts/analyze_holdings.py --all
+
+  # Custom CSVs and threshold
+  uv run python scripts/analyze_holdings.py \\
+      --csv ~/Downloads/Portfolio_Positions_May-10-2026.csv \\
+      --csv ~/Downloads/Portfolio_Positions_May-10-2026\\(1\\).csv \\
+      --min-pct 0.5
+
+The script writes everything under ``outputs/portfolio_analysis_<date>/``:
+  - ``REPORT.md``   — human-readable per-ticker writeup
+  - ``actions.csv`` — flat per-account action list
+  - ``summary.csv`` — one row per ticker with rating + key fields
+  - ``per_ticker/<TICKER>.json`` — full final_state for each analysis
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import sys
+import time
+from dataclasses import asdict
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from dotenv import find_dotenv, load_dotenv
+
+load_dotenv(find_dotenv(usecwd=True))
+
+from tradingagents.default_config import DEFAULT_CONFIG  # noqa: E402
+from tradingagents.graph.trading_graph import TradingAgentsGraph  # noqa: E402
+from tradingagents.portfolio.holdings import (  # noqa: E402
+    Holding,
+    aggregate_by_ticker,
+    build_holdings_context,
+    parse_fidelity_csv,
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+log = logging.getLogger("analyze_holdings")
+
+
+DEFAULT_CSV_PATHS = [
+    Path.home() / "Downloads" / "Portfolio_Positions_May-10-2026.csv",
+    Path.home() / "Downloads" / "Portfolio_Positions_May-10-2026(1).csv",
+]
+
+
+def load_holdings(csv_paths: list[Path]) -> tuple[dict[str, Holding], float]:
+    """Parse all CSVs, aggregate by ticker, return (holdings, total_value)."""
+    all_positions = []
+    for p in csv_paths:
+        if not p.exists():
+            log.warning("CSV not found, skipping: %s", p)
+            continue
+        positions = parse_fidelity_csv(p)
+        log.info("Loaded %d positions from %s", len(positions), p.name)
+        all_positions.extend(positions)
+    holdings = aggregate_by_ticker(all_positions)
+    total_value = sum(h.total_value for h in holdings.values())
+    return holdings, total_value
+
+
+def select_tickers(
+    holdings: dict[str, Holding],
+    total_value: float,
+    min_pct: float,
+    explicit_ticker: str | None,
+    explicit_list: list[str] | None,
+) -> list[str]:
+    """Pick which tickers to analyze.
+
+    Priority: ``explicit_ticker`` > ``explicit_list`` > min_pct cutoff.
+    Tickers absent from ``holdings`` produce a hard error.
+    """
+    if explicit_ticker:
+        if explicit_ticker not in holdings:
+            raise SystemExit(
+                f"Ticker {explicit_ticker} not found in holdings. "
+                f"Available: {sorted(holdings)}"
+            )
+        return [explicit_ticker]
+
+    if explicit_list:
+        missing = [t for t in explicit_list if t not in holdings]
+        if missing:
+            raise SystemExit(
+                f"These tickers were not found in holdings: {missing}. "
+                f"Available: {sorted(holdings)}"
+            )
+        return sorted(explicit_list, key=lambda s: -holdings[s].total_value)
+
+    selected = [
+        sym
+        for sym, h in holdings.items()
+        if total_value and (h.total_value / total_value * 100) >= min_pct
+    ]
+    selected.sort(key=lambda s: -holdings[s].total_value)
+    return selected
+
+
+def build_config(deep_model: str, quick_model: str) -> dict[str, Any]:
+    config = DEFAULT_CONFIG.copy()
+    config["deep_think_llm"] = deep_model
+    config["quick_think_llm"] = quick_model
+    config["max_debate_rounds"] = 1
+    config["data_vendors"] = {
+        "core_stock_apis": "yfinance",
+        "technical_indicators": "yfinance",
+        "fundamental_data": "yfinance",
+        "news_data": "yfinance",
+    }
+    return config
+
+
+def run_one(
+    ta: TradingAgentsGraph,
+    ticker: str,
+    trade_date: str,
+    holdings: dict[str, Holding],
+    portfolio_total: float,
+) -> dict[str, Any]:
+    """Run the multi-agent graph for one ticker, return the final_state dict."""
+    holding = holdings[ticker]
+    ctx = build_holdings_context(ticker, holding, portfolio_total)
+    log.info("=== Analyzing %s ($%.0f, %d accts) ===", ticker, holding.total_value, len(holding.positions))
+
+    t0 = time.time()
+    final_state, _signal = ta.propagate(ticker, trade_date, holdings_context=ctx)
+    dt = time.time() - t0
+    log.info("[%s] done in %.1fs", ticker, dt)
+    return final_state
+
+
+def write_per_ticker_json(out_dir: Path, ticker: str, final_state: dict[str, Any]) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    serialisable = {
+        k: v
+        for k, v in final_state.items()
+        if isinstance(v, (str, int, float, bool, list, dict)) or v is None
+    }
+    (out_dir / f"{ticker}.json").write_text(
+        json.dumps(serialisable, indent=2, default=str), encoding="utf-8"
+    )
+
+
+def write_report(
+    out_dir: Path,
+    trade_date: str,
+    portfolio_total: float,
+    results: list[tuple[str, Holding, dict[str, Any]]],
+) -> None:
+    """Render the human-readable REPORT.md."""
+    lines = [
+        f"# Portfolio Analysis — {trade_date}",
+        "",
+        f"Total analyzed portfolio value: **${portfolio_total:,.0f}**",
+        f"Tickers analyzed: **{len(results)}**",
+        "",
+        "---",
+        "",
+    ]
+    for ticker, holding, state in results:
+        rating_md = state.get("final_trade_decision", "(no decision)")
+        lines.extend(
+            [
+                f"## {ticker}",
+                "",
+                f"- Total value: ${holding.total_value:,.2f} "
+                f"({holding.total_value / portfolio_total * 100:.2f}% of portfolio)",
+                f"- Cost basis: ${holding.total_cost:,.2f}",
+                f"- Unrealized P/L: {holding.unrealized_pl_pct:+.1f}%",
+                f"- Accounts: {len(holding.positions)}",
+                "",
+                "### Final Decision",
+                "",
+                rating_md,
+                "",
+                "---",
+                "",
+            ]
+        )
+    (out_dir / "REPORT.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_csvs(
+    out_dir: Path,
+    results: list[tuple[str, Holding, dict[str, Any]]],
+) -> None:
+    """Render summary.csv (one row per ticker) and actions.csv (one row per account-action)."""
+    import csv
+    import re
+
+    rating_re = re.compile(r"\*\*Rating\*\*:\s*(\w+)", re.IGNORECASE)
+    action_re = re.compile(
+        r"\*\*(?P<account>[^\*]+?)\*\*\s*\[(?P<type>\w+)\]\s*→\s*"
+        r"\*\*(?P<action>\w+)\*\*(?:\s*\((?P<size>[\d.]+)% of current\))?"
+        r"\s*:\s*(?P<rationale>.*?)(?=$)",
+        re.MULTILINE,
+    )
+
+    with open(out_dir / "summary.csv", "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["ticker", "value", "cost", "pl_pct", "rating"])
+        for ticker, h, state in results:
+            md = state.get("final_trade_decision", "")
+            m = rating_re.search(md)
+            rating = m.group(1) if m else ""
+            w.writerow(
+                [
+                    ticker,
+                    f"{h.total_value:.2f}",
+                    f"{h.total_cost:.2f}",
+                    f"{h.unrealized_pl_pct:.2f}",
+                    rating,
+                ]
+            )
+
+    with open(out_dir / "actions.csv", "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["ticker", "account", "account_type", "action", "size_pct", "rationale"])
+        for ticker, _h, state in results:
+            md = state.get("final_trade_decision", "")
+            for m in action_re.finditer(md):
+                w.writerow(
+                    [
+                        ticker,
+                        m.group("account").strip(),
+                        m.group("type"),
+                        m.group("action"),
+                        m.group("size") or "",
+                        m.group("rationale").strip(),
+                    ]
+                )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--csv",
+        action="append",
+        type=Path,
+        help="Path to a Fidelity portfolio CSV. Can be passed multiple times. Defaults to two known files in ~/Downloads.",
+    )
+    parser.add_argument("--ticker", help="Run for a single ticker only (dry-run mode).")
+    parser.add_argument("--tickers", help="Comma-separated whitelist (e.g. 'GOOGL,AMZN,AAPL'). Bypasses --min-pct.")
+    parser.add_argument("--all", action="store_true", help="Run all tickers above --min-pct.")
+    parser.add_argument("--min-pct", type=float, default=1.0, help="Minimum portfolio share (in %%) to analyze when --all. Default 1.0.")
+    parser.add_argument("--trade-date", default="2026-05-08", help="Trading date (YYYY-MM-DD). Default 2026-05-08 (last trading day before today).")
+    parser.add_argument("--deep-model", default="gpt-5.4-mini")
+    parser.add_argument("--quick-model", default="gpt-5.4-mini")
+    parser.add_argument("--out-dir", type=Path, default=Path("outputs"))
+    args = parser.parse_args()
+
+    if not args.ticker and not args.all and not args.tickers:
+        parser.error("Must pass --ticker <SYM>, --tickers <CSV>, or --all")
+    explicit_list = (
+        [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+        if args.tickers
+        else None
+    )
+
+    csv_paths = args.csv if args.csv else DEFAULT_CSV_PATHS
+    holdings, portfolio_total = load_holdings(csv_paths)
+    if not holdings:
+        log.error("No holdings parsed from any CSV.")
+        return 1
+    log.info("Aggregated portfolio: $%.0f across %d tickers", portfolio_total, len(holdings))
+
+    tickers = select_tickers(holdings, portfolio_total, args.min_pct, args.ticker, explicit_list)
+    log.info("Will analyze %d ticker(s): %s", len(tickers), ", ".join(tickers))
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    out_dir = args.out_dir / f"portfolio_analysis_{timestamp}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    per_ticker_dir = out_dir / "per_ticker"
+
+    config = build_config(args.deep_model, args.quick_model)
+    ta = TradingAgentsGraph(debug=False, config=config)
+
+    results: list[tuple[str, Holding, dict[str, Any]]] = []
+    for i, ticker in enumerate(tickers, 1):
+        log.info("[%d/%d] Starting %s", i, len(tickers), ticker)
+        try:
+            state = run_one(ta, ticker, args.trade_date, holdings, portfolio_total)
+        except Exception as exc:
+            log.exception("Failed on %s: %s", ticker, exc)
+            continue
+        results.append((ticker, holdings[ticker], state))
+        write_per_ticker_json(per_ticker_dir, ticker, state)
+
+    if results:
+        write_report(out_dir, args.trade_date, portfolio_total, results)
+        write_csvs(out_dir, results)
+        log.info("All outputs written to %s", out_dir)
+    else:
+        log.error("No tickers produced results.")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

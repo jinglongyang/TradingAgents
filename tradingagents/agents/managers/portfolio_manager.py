@@ -39,6 +39,28 @@ def create_portfolio_manager(llm):
             else ""
         )
 
+        holdings_context = state.get("holdings_context", "")
+        if holdings_context:
+            holdings_block = (
+                f"\n---\n\n{holdings_context}\n\n"
+                "Because the user already holds this position across multiple accounts, "
+                "you MUST also populate `account_actions` with one entry per account "
+                "listed above. Use these tax-aware rules:\n"
+                "1. Prefer rebalancing in **TaxDeferred** accounts (zero tax cost).\n"
+                "2. In **Taxable** accounts: trim heavy winners only when the rating "
+                "is Underweight/Sell, and prefer harvesting losses for tax savings.\n"
+                "3. In **Roth** accounts: avoid selling winners (lose precious tax-free "
+                "compounding seat); use these for Buy/Overweight conviction holds.\n"
+                "4. Use **SwapToTaxAdvantaged** when a low-cost-basis position sits in "
+                "Taxable but Roth/TaxDeferred has cash to buy the same exposure.\n"
+                "5. **ChildEdu** accounts: only adjust when the rating is decisive and "
+                "the long horizon supports it; respect 529 rebalancing limits.\n"
+                "Per-account actions must collectively be consistent with the top-level "
+                "rating you choose.\n"
+            )
+        else:
+            holdings_block = ""
+
         prompt = f"""As the Portfolio Manager, synthesize the risk analysts' debate and deliver the final trading decision.
 
 {instrument_context}
@@ -58,7 +80,7 @@ def create_portfolio_manager(llm):
 {lessons_line}
 **Risk Analysts Debate History:**
 {history}
-
+{holdings_block}
 ---
 
 Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}"""

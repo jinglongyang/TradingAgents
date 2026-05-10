@@ -19,7 +19,7 @@ so that:
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -168,6 +168,50 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
 # ---------------------------------------------------------------------------
 
 
+class AccountAction(str, Enum):
+    """Per-account rebalancing action emitted when holdings context is supplied."""
+
+    HOLD = "Hold"
+    REDUCE = "Reduce"
+    ADD = "Add"
+    EXIT = "Exit"
+    SWAP_TO_TAX_ADVANTAGED = "SwapToTaxAdvantaged"
+
+
+class AccountActionItem(BaseModel):
+    """One concrete rebalancing instruction for a single broker account."""
+
+    account_name: str = Field(
+        description="The exact account name copied from the holdings context (e.g. 'Roth IRA', 'BrokerageLink-UP').",
+    )
+    account_type: str = Field(
+        description="One of Roth / TaxDeferred / Taxable / ChildEdu / Unknown, copied from the holdings context.",
+    )
+    action: AccountAction = Field(
+        description=(
+            "Rebalancing action for this account. Hold = no change. Reduce = trim "
+            "this position partially. Add = increase this position. Exit = sell all. "
+            "SwapToTaxAdvantaged = sell here and rebuy in a Roth/TaxDeferred account "
+            "to relocate the position into a more tax-efficient seat."
+        ),
+    )
+    size_pct: Optional[float] = Field(
+        default=None,
+        description=(
+            "Magnitude of the action expressed as a percentage of the current "
+            "position in this account. e.g. 25 means trim/add 25% of current shares. "
+            "Leave null for Hold."
+        ),
+    )
+    rationale: str = Field(
+        description=(
+            "One or two sentences explaining why this action makes sense for this "
+            "specific account, referencing the account's tax treatment and the "
+            "position's cost basis / unrealized P&L."
+        ),
+    )
+
+
 class PortfolioDecision(BaseModel):
     """Structured output produced by the Portfolio Manager.
 
@@ -204,6 +248,17 @@ class PortfolioDecision(BaseModel):
         default=None,
         description="Optional recommended holding period, e.g. '3-6 months'.",
     )
+    account_actions: Optional[List[AccountActionItem]] = Field(
+        default=None,
+        description=(
+            "Per-account rebalancing instructions. ONLY populate when the prompt "
+            "supplies a 'Current Holdings of this Ticker' block. One entry per "
+            "account that currently holds the position; the actions should "
+            "collectively implement the top-level rating with appropriate "
+            "tax-aware sequencing (rebalance in tax-deferred first, harvest "
+            "losses in taxable, preserve Roth seats for high-conviction longs)."
+        ),
+    )
 
 
 def render_pm_decision(decision: PortfolioDecision) -> str:
@@ -225,4 +280,12 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
         parts.extend(["", f"**Price Target**: {decision.price_target}"])
     if decision.time_horizon:
         parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
+    if decision.account_actions:
+        parts.extend(["", "**Per-Account Actions**:"])
+        for item in decision.account_actions:
+            size = f" ({item.size_pct:.0f}% of current)" if item.size_pct is not None else ""
+            parts.append(
+                f"- **{item.account_name}** [{item.account_type}] → "
+                f"**{item.action.value}**{size}: {item.rationale}"
+            )
     return "\n".join(parts)

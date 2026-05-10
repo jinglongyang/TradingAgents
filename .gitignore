@@ -3,6 +3,10 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Personal portfolio analysis outputs (contain private financial data)
+outputs/
+.claude/
+
 # C extensions
 *.so
 

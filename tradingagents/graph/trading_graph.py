@@ -291,14 +291,20 @@ class TradingAgentsGraph:
         if updates:
             self.memory_log.batch_update_with_outcomes(updates)
 
-    def propagate(self, company_name, trade_date):
+    def propagate(self, company_name, trade_date, holdings_context: str = ""):
         """Run the trading agents graph for a company on a specific date.
 
         When ``checkpoint_enabled`` is set in config, the graph is recompiled
         with a per-ticker SqliteSaver so a crashed run can resume from the last
         successful node on a subsequent invocation with the same ticker+date.
+
+        ``holdings_context`` is an optional markdown block describing the
+        user's existing per-account positions; when supplied, the Portfolio
+        Manager produces account-level rebalancing actions in addition to
+        the standard rating.
         """
         self.ticker = company_name
+        self._holdings_context = holdings_context
 
         # Resolve any pending memory-log entries for this ticker before the pipeline runs.
         self._resolve_pending_entries(company_name)
@@ -334,7 +340,10 @@ class TradingAgentsGraph:
         # Initialize state — inject memory log context for PM.
         past_context = self.memory_log.get_past_context(company_name)
         init_agent_state = self.propagator.create_initial_state(
-            company_name, trade_date, past_context=past_context
+            company_name,
+            trade_date,
+            past_context=past_context,
+            holdings_context=getattr(self, "_holdings_context", ""),
         )
         args = self.propagator.get_graph_args()
 
