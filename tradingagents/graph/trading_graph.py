@@ -36,7 +36,8 @@ from tradingagents.agents.utils.agent_utils import (
     get_income_statement,
     get_news,
     get_insider_transactions,
-    get_global_news
+    get_global_news,
+    web_search_news,
 )
 
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
@@ -177,6 +178,9 @@ class TradingAgentsGraph:
                     get_news,
                     get_global_news,
                     get_insider_transactions,
+                    # Live web news for events the structured APIs miss
+                    # (recent 8-K filings, credit rating actions, partnerships)
+                    web_search_news,
                 ]
             ),
             "fundamentals": ToolNode(
@@ -186,6 +190,9 @@ class TradingAgentsGraph:
                     get_balance_sheet,
                     get_cashflow,
                     get_income_statement,
+                    # Allow fundamentals analyst to verify recent investments,
+                    # ratings actions, and material capital structure events.
+                    web_search_news,
                 ]
             ),
         }
