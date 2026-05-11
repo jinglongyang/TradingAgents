@@ -64,9 +64,17 @@ def safe_invoke(llm, prompt: str, agent_label: str = "agent", max_retries: int =
     for attempt in range(max_retries + 1):
         try:
             return llm.invoke(attempt_prompt)
-        except ValueError as e:
+        except Exception as e:
+            # Match the filter signature across SDKs: langchain wraps as
+            # ValueError, OpenAI Python SDK raises BadRequestError (status 400)
+            # whose str() begins with "Error code: 400 - {... 'code':
+            # 'content_filter', 'code': 'ResponsibleAIPolicyViolation' ...}".
             msg = str(e).lower()
-            if "content filter" not in msg and "responsibleaipolicy" not in msg:
+            if (
+                "content filter" not in msg
+                and "content_filter" not in msg
+                and "responsibleaipolicy" not in msg
+            ):
                 raise
             last_err = e
             log.warning(
