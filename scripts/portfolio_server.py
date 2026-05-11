@@ -177,6 +177,8 @@ function openEdit(snapshotId, sym, qty, price, cost, broker) {
     document.getElementById('edit-qty').value = qty;
     document.getElementById('edit-price').value = price;
     document.getElementById('edit-cost').value = cost;
+    // Pre-fill avg cost (cost / qty)
+    document.getElementById('edit-avg-cost').value = qty > 0 ? (cost / qty).toFixed(4) : '';
     document.getElementById('edit-broker').value = broker || 'Fidelity';
     document.getElementById('edit-title').textContent = `Edit ${sym}`;
     const anchorInp = document.querySelector('#edit-modal input[name="redirect_anchor"]');
@@ -357,8 +359,12 @@ def _render(message: str = ""):
       </div>
       <div class="row">
         <div class="field"><label>当前价 <span class="hint">每股</span></label><input name="last_price" type="number" step="0.01"></div>
-        <div class="field"><label>总成本</label><input name="cost_basis_total" type="number" step="0.01"></div>
+        <div class="field"><label>每股成本 <span class="hint">Robinhood 显示这个</span></label>
+          <input name="avg_cost" type="number" step="0.01" id="add-avg-cost"
+                 oninput="document.getElementById('add-cost-total').value = (this.value * document.querySelector('#add-modal input[name=\\'quantity\\']').value || 0).toFixed(2)"></div>
       </div>
+      <div class="field"><label>总成本 <span class="hint">= 每股成本 × 股数，自动算；也可手填</span></label>
+        <input id="add-cost-total" name="cost_basis_total" type="number" step="0.01"></div>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
         <button type="button" class="secondary" onclick="closeModal('add-modal')">取消</button>
         <button type="submit" class="success">添加</button>
@@ -503,10 +509,18 @@ function toggleRunMode(mode) {{
       <input type="hidden" id="edit-snapshot-id" name="snapshot_id">
       <div class="field"><label>Ticker <span class="hint">readonly</span></label><input id="edit-symbol" readonly style="background:var(--bg-subtle);"></div>
       <div class="row">
-        <div class="field"><label>持股数</label><input id="edit-qty" name="quantity" type="number" step="0.001" required></div>
+        <div class="field"><label>持股数</label>
+          <input id="edit-qty" name="quantity" type="number" step="0.001" required
+                 oninput="const ac=document.getElementById('edit-avg-cost'); if(ac.value) document.getElementById('edit-cost').value = (ac.value * this.value || 0).toFixed(2)"></div>
         <div class="field"><label>当前价</label><input id="edit-price" name="last_price" type="number" step="0.01"></div>
       </div>
-      <div class="field"><label>总成本</label><input id="edit-cost" name="cost_basis_total" type="number" step="0.01"></div>
+      <div class="row">
+        <div class="field"><label>每股成本 <span class="hint">Robinhood 显示这个</span></label>
+          <input id="edit-avg-cost" type="number" step="0.01"
+                 oninput="document.getElementById('edit-cost').value = (this.value * document.getElementById('edit-qty').value || 0).toFixed(2)"></div>
+        <div class="field"><label>总成本 <span class="hint">自动算或手填</span></label>
+          <input id="edit-cost" name="cost_basis_total" type="number" step="0.01"></div>
+      </div>
       <div class="field">
         <label>Broker / 平台</label>
         <select id="edit-broker" name="broker">
