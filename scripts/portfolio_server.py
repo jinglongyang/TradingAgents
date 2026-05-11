@@ -240,6 +240,7 @@ def _render(message: str = ""):
     <a class="btn secondary" href="/lots">📦 Cost Basis Lots</a>
     <a class="btn secondary" href="/decisions">📋 PM 分析</a>
     <a class="btn secondary" href="/thesis-evolution">📈 Thesis 演变</a>
+    <a class="btn secondary" href="/charts">📊 Charts</a>
     <a class="btn secondary" href="/runs">🏃 运行历史</a>
     <a class="btn secondary" href="/executions">📒 交易记录</a>
     <a class="btn secondary" href="/api/positions" target="_blank">View JSON</a>
@@ -1258,6 +1259,111 @@ def drift_view():
 .tag-sell {{ background: color-mix(in srgb, var(--danger) 30%, transparent); color: var(--danger); }}
 </style></head><body><div class="container">
 {''.join(body)}
+</div></body></html>"""
+
+
+@app.get("/charts", response_class=HTMLResponse)
+def charts_view():
+    """Visual breakdowns: ticker weight / owner / account_type / broker pies."""
+    import math
+    latest = latest_snapshot_date()
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM positions_snapshot WHERE import_date = ?",
+            (latest,) if latest else (date.today().isoformat(),),
+        ).fetchall()
+
+    if not rows:
+        return HTMLResponse("<p>No data</p><a href='/'>← Back</a>")
+
+    total = sum(r["current_value"] for r in rows)
+
+    def aggregate(key: str) -> list[tuple[str, float]]:
+        d: dict[str, float] = {}
+        for r in rows:
+            d[r[key] or "Unknown"] = d.get(r[key] or "Unknown", 0) + r["current_value"]
+        sorted_pairs = sorted(d.items(), key=lambda kv: -kv[1])
+        # Cap at 10 slices + Other
+        if len(sorted_pairs) > 10:
+            top = sorted_pairs[:10]
+            other = sum(v for _, v in sorted_pairs[10:])
+            top.append(("Other", other))
+            return top
+        return sorted_pairs
+
+    def aggregate_tickers() -> list[tuple[str, float]]:
+        d: dict[str, float] = {}
+        for r in rows:
+            d[r["symbol"]] = d.get(r["symbol"], 0) + r["current_value"]
+        sorted_pairs = sorted(d.items(), key=lambda kv: -kv[1])
+        if len(sorted_pairs) > 12:
+            top = sorted_pairs[:12]
+            other = sum(v for _, v in sorted_pairs[12:])
+            top.append(("Other", other))
+            return top
+        return sorted_pairs
+
+    PALETTE = ["#0969da", "#1a7f37", "#9a6700", "#8250df", "#d1242f",
+               "#0a3069", "#116329", "#7d4e00", "#5a1e93", "#a40e26",
+               "#1f6feb", "#3fb950", "#d29922", "#a371f7", "#f85149"]
+
+    def render_pie(data: list[tuple[str, float]], title: str, size: int = 320) -> str:
+        total_v = sum(v for _, v in data)
+        if not total_v:
+            return ""
+        cx, cy, r = size / 2, size / 2, size / 2 - 8
+        arcs = []
+        start_angle = -math.pi / 2  # start at top
+        for i, (label, value) in enumerate(data):
+            angle = value / total_v * 2 * math.pi
+            end_angle = start_angle + angle
+            x1 = cx + r * math.cos(start_angle)
+            y1 = cy + r * math.sin(start_angle)
+            x2 = cx + r * math.cos(end_angle)
+            y2 = cy + r * math.sin(end_angle)
+            large = 1 if angle > math.pi else 0
+            color = PALETTE[i % len(PALETTE)]
+            path = f"M{cx},{cy} L{x1:.2f},{y1:.2f} A{r},{r} 0 {large},1 {x2:.2f},{y2:.2f} Z"
+            arcs.append(f'<path d="{path}" fill="{color}" stroke="var(--bg)" stroke-width="1.5"><title>{label}: ${value:,.0f} ({value/total_v*100:.1f}%)</title></path>')
+            start_angle = end_angle
+
+        # Legend
+        legend = ['<div style="display:flex;flex-direction:column;gap:4px;font-size:12px;">']
+        for i, (label, value) in enumerate(data):
+            pct = value / total_v * 100
+            color = PALETTE[i % len(PALETTE)]
+            legend.append(
+                f'<div style="display:flex;align-items:center;gap:8px;">'
+                f'<span style="display:inline-block;width:14px;height:14px;background:{color};border-radius:3px;"></span>'
+                f'<span style="flex:1;">{label}</span>'
+                f'<span style="font-variant-numeric:tabular-nums;color:var(--fg-muted);">${value/1000:.0f}K · {pct:.1f}%</span>'
+                f'</div>'
+            )
+        legend.append('</div>')
+
+        return f'''
+<div style="background:var(--bg-subtle);border-radius:8px;padding:20px;border:1px solid var(--border);margin-bottom:20px;">
+  <h3 style="margin-top:0;font-size:15px;">{title}</h3>
+  <div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap;">
+    <svg width="{size}" height="{size}" viewBox="0 0 {size} {size}" style="flex-shrink:0;">{"".join(arcs)}</svg>
+    <div style="flex:1;min-width:200px;">{"".join(legend)}</div>
+  </div>
+</div>'''
+
+    pie_ticker = render_pie(aggregate_tickers(), "🏷️ 按 Ticker 权重")
+    pie_owner = render_pie(aggregate("owner"), "👥 按 Owner")
+    pie_type = render_pie(aggregate("account_type"), "💰 按账户类型（税务桶）")
+    pie_broker = render_pie(aggregate("broker"), "🏦 按 Broker")
+
+    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Charts</title><style>{CSS}</style></head><body><div class="container">
+<h1>📊 持仓权重可视化</h1>
+<p class="subtitle">总价值 <strong>${total:,.0f}</strong> · 数据日期 {latest or "今天"}</p>
+<div style="margin-bottom:24px;"><a class="btn secondary" href="/">← 持仓</a></div>
+{pie_ticker}
+{pie_owner}
+{pie_type}
+{pie_broker}
 </div></body></html>"""
 
 
