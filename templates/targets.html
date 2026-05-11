@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}目标权重 — Portfolio Manager{% endblock %}
+
+{% block content %}
+  <h1>🎯 目标组合权重</h1>
+  <p class="subtitle">
+    组合总值 <strong>${{ "{:,.0f}".format(portfolio_total) }}</strong> ·
+    {{ rows|length }} 个 ticker · 已设目标 <strong>{{ n_with_target }}</strong> 个 ·
+    目标合计 <strong style="color:{% if target_total > 100.1 %}var(--loss){% elif target_total < 99.9 and target_total > 0 %}#d97706{% else %}var(--gain){% endif %};">{{ "%.1f"|format(target_total) }}%</strong>
+    {% if target_total > 100.1 %}（超过 100%！）{% elif target_total > 0 and target_total < 99.9 %}（未配满）{% endif %}
+  </p>
+
+  <div style="margin-bottom:16px;">
+    <a class="btn secondary" href="/">← 回到持仓</a>
+    <a class="btn secondary" href="/today">🎯 今日清单</a>
+  </div>
+
+  <p style="font-size:13px;color:var(--fg-muted);">
+    在这里设定每个 ticker 在组合里期望的目标占比（按现值计）。<code>/today</code> 会用这个把"加仓"按 drift（距离目标多远）排序 —— 离目标最远的优先。
+    留空 = 取消该 ticker 的目标。
+  </p>
+
+  <table style="background:var(--bg-subtle);border-radius:8px;border:1px solid var(--border);overflow:hidden;width:100%;">
+    <thead>
+      <tr>
+        <th>Ticker</th>
+        <th class="num">当前价值</th>
+        <th class="num">当前占比</th>
+        <th class="num">目标占比</th>
+        <th class="num">缺口</th>
+        <th>设定</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td><a href="/decisions/{{ r.symbol }}" style="font-weight:600;">{{ r.symbol }}</a></td>
+        <td class="num">${{ "{:,.0f}".format(r.current_value) }}</td>
+        <td class="num">{{ "%.2f"|format(r.current_pct) }}%</td>
+        <td class="num">
+          {% if r.target_pct is not none %}
+            <strong>{{ "%.2f"|format(r.target_pct) }}%</strong>
+          {% else %}
+            <span style="color:var(--fg-muted);">未设</span>
+          {% endif %}
+        </td>
+        <td class="num">
+          {% if r.drift is not none %}
+            <strong style="color:{% if r.drift > 0.5 %}var(--gain){% elif r.drift < -0.5 %}var(--loss){% else %}var(--fg-muted){% endif %};">
+              {% if r.drift > 0 %}+{% endif %}{{ "%.2f"|format(r.drift) }}%
+            </strong>
+            <div style="font-size:10px;color:var(--fg-muted);">
+              {% if r.drift > 0 %}欠 ${{ "{:,.0f}".format(r.drift / 100 * portfolio_total) }}{% elif r.drift < 0 %}超 ${{ "{:,.0f}".format(-r.drift / 100 * portfolio_total) }}{% endif %}
+            </div>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          <form method="post" action="/targets/set" style="display:flex;gap:4px;align-items:center;margin:0;">
+            <input type="hidden" name="symbol" value="{{ r.symbol }}">
+            <input name="target_pct" type="number" step="0.01" min="0" max="100"
+                   value="{{ r.target_pct if r.target_pct is not none else '' }}"
+                   placeholder="留空取消"
+                   style="width:90px;padding:3px 6px;font-size:12px;">
+            <button type="submit" class="btn small secondary" style="padding:3px 8px;font-size:11px;">保存</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endblock %}

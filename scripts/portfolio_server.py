@@ -1717,19 +1717,99 @@ def _extract_price_levels(md: str) -> tuple[float | None, float | None]:
 
 def _priority_score(item: dict) -> float:
     """Higher = do first. Composite of rating strength, account tax efficiency,
-    expected return (price target vs current price), and dollar magnitude.
+    drift to target (capital where the gap is biggest), expected return, and
+    dollar magnitude.
 
     Weights are chosen so rating dominates the ordering, then tax-efficiency,
-    then expected_return acts as a tiebreaker among same-rating same-tax
-    picks (e.g. two Overweight buys in a 401k — favour the one with more
-    upside to target). Dollar magnitude only matters at the margins."""
+    then under-weight drift (push capital toward target before chasing extras),
+    then expected_return as a tiebreaker, with dollar magnitude only relevant
+    at the margins."""
     import math
     rating = _RATING_WEIGHT.get(item.get("rating"), 1)
     tax = _TAX_WEIGHT.get(item.get("account_type"), 1)
     value = max(item.get("est_value") or 0, 0)
     exp_return = item.get("expected_return")  # fraction, e.g. 0.18 = +18%
     return_bonus = (exp_return * 100 * 10) if exp_return is not None else 0
-    return rating * 10000 + tax * 1000 + return_bonus + math.log10(value + 1) * 5
+    drift = item.get("drift_pct")  # positive = under target by N%
+    drift_bonus = (max(drift, 0) * 50) if drift is not None else 0
+    return rating * 10000 + tax * 1000 + drift_bonus + return_bonus + math.log10(value + 1) * 5
+
+
+@app.get("/targets", response_class=HTMLResponse)
+def targets_view():
+    """Edit per-ticker target portfolio weights.
+
+    Lists every ticker present in the latest snapshot plus any ticker with
+    a saved target (so user-defined targets for not-yet-held tickers also
+    appear). Current weight is computed from the snapshot; target is
+    user-editable and persisted to ``target_weights``.
+    """
+    with connect() as conn:
+        snapshot_rows = conn.execute(
+            """
+            SELECT symbol, SUM(current_value) AS total_value
+            FROM positions_snapshot
+            WHERE import_date = (SELECT MAX(import_date) FROM positions_snapshot)
+            GROUP BY symbol
+            """
+        ).fetchall()
+        target_rows = conn.execute("SELECT symbol, target_pct FROM target_weights").fetchall()
+
+    portfolio_total = sum(r["total_value"] or 0 for r in snapshot_rows)
+    targets = {r["symbol"]: r["target_pct"] for r in target_rows}
+    held = {r["symbol"]: (r["total_value"] or 0) for r in snapshot_rows}
+
+    rows = []
+    all_symbols = set(held.keys()) | set(targets.keys())
+    for sym in sorted(all_symbols):
+        value = held.get(sym, 0)
+        cur_pct = (value / portfolio_total * 100) if portfolio_total else 0
+        tgt_pct = targets.get(sym)
+        drift = (tgt_pct - cur_pct) if tgt_pct is not None else None
+        rows.append({
+            "symbol": sym,
+            "current_value": value,
+            "current_pct": cur_pct,
+            "target_pct": tgt_pct,
+            "drift": drift,
+        })
+
+    target_total = sum(t for t in targets.values()) if targets else 0
+    return templates.TemplateResponse(
+        _dummy_request(), "targets.html",
+        {
+            "css": CSS,
+            "rows": rows,
+            "portfolio_total": portfolio_total,
+            "target_total": target_total,
+            "n_with_target": sum(1 for r in rows if r["target_pct"] is not None),
+        },
+    )
+
+
+@app.post("/targets/set")
+def set_target_weight(symbol: str = Form(...), target_pct: str = Form("")):
+    """Upsert a single target weight, or delete the row when target_pct is blank."""
+    sym = symbol.strip().upper()
+    with connect() as conn:
+        if not target_pct.strip():
+            conn.execute("DELETE FROM target_weights WHERE symbol = ?", (sym,))
+        else:
+            try:
+                pct = float(target_pct)
+            except ValueError:
+                return RedirectResponse(url="/targets", status_code=303)
+            conn.execute(
+                """
+                INSERT INTO target_weights (symbol, target_pct, updated_at)
+                VALUES (?, ?, datetime('now'))
+                ON CONFLICT(symbol) DO UPDATE SET
+                    target_pct = excluded.target_pct,
+                    updated_at = excluded.updated_at
+                """,
+                (sym, max(pct, 0)),
+            )
+    return RedirectResponse(url="/targets", status_code=303)
 
 
 @app.post("/account-cash")
@@ -1786,6 +1866,14 @@ def today_view():
                 """
             ).fetchall()
         }
+        target_rows = conn.execute("SELECT symbol, target_pct FROM target_weights").fetchall()
+
+    # Per-ticker portfolio aggregates for drift calculation
+    target_weights = {r["symbol"]: r["target_pct"] for r in target_rows}
+    ticker_total: dict[str, float] = {}
+    for (_aid, sym), row in snapshot.items():
+        ticker_total[sym] = ticker_total.get(sym, 0) + (row.get("current_value") or 0)
+    portfolio_total = sum(ticker_total.values())
 
     # account_name → first observed account_id (decisions only carry the name)
     name_to_account: dict[str, str] = {}
@@ -1819,6 +1907,13 @@ def today_view():
             downside = ((price - stop_loss) / price) if (stop_loss and price and price > 0) else None
             rr_ratio = (expected_return / downside) if (expected_return and downside and downside > 0) else None
 
+            # Drift: how far the *ticker* (across all accounts) sits from the
+            # user-defined target weight. Positive = under target → priority
+            # bonus. Capital should flow where the gap is biggest first.
+            target_pct = target_weights.get(d["symbol"])
+            current_pct = (ticker_total.get(d["symbol"], 0) / portfolio_total * 100) if portfolio_total else 0
+            drift_pct = (target_pct - current_pct) if target_pct is not None else None
+
             items.append({
                 "ticker": d["symbol"],
                 "rating": d["rating"],
@@ -1836,6 +1931,9 @@ def today_view():
                 "expected_return": expected_return,
                 "downside": downside,
                 "rr_ratio": rr_ratio,
+                "target_pct": target_pct,
+                "current_pct": current_pct,
+                "drift_pct": drift_pct,
                 "rationale": a.get("rationale", ""),
                 "bucket": _ACTION_BUCKETS.get(a.get("action", ""), "hold"),
             })

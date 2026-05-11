@@ -187,4 +187,17 @@ def init_db(db_path: Path | None = None) -> Path:
             )
             """
         )
+
+        # Per-ticker target portfolio weight (as percent, e.g. 5.0 = 5%).
+        # Lets /today rank under-weight tickers ahead of those already at
+        # target so an add deploys capital where the gap is biggest.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS target_weights (
+                symbol       TEXT PRIMARY KEY,
+                target_pct   REAL NOT NULL,
+                updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
     return path

@@ -41,6 +41,7 @@
 
   <div style="margin-bottom:16px;">
     <a class="btn secondary" href="/">← 回到持仓</a>
+    <a class="btn secondary" href="/targets">🎯 目标权重</a>
     <a class="btn secondary" href="/decisions">📋 评级总览</a>
     <a class="btn secondary" href="/executions">📒 交易记录</a>
   </div>
@@ -85,6 +86,7 @@
             <th class="num">估算股数</th>
             <th class="num">估算金额</th>
             <th class="num" title="预期上涨 / 至止损下跌">收益/风险</th>
+            <th class="num" title="当前组合占比 vs 目标占比">权重</th>
             <th>理由</th>
           </tr>
         </thead>
@@ -103,6 +105,7 @@
               {% else %}—{% endif %}
             </td>
             <td class="num">{% if i.est_value is not none %}${{ "{:,.0f}".format(i.est_value) }}{% else %}—{% endif %}</td>
+            <td class="num" style="font-size:11px;color:var(--fg-muted);">—</td>
             <td class="num" style="font-size:11px;color:var(--fg-muted);">—</td>
             <td style="font-size:12px;color:var(--fg-muted);max-width:380px;">{{ i.rationale }}</td>
           </tr>
@@ -139,6 +142,17 @@
                   <div style="font-size:10px;color:var(--fg-muted);">RR {{ "%.1f"|format(i.rr_ratio) }}x</div>
                 {% endif %}
               {% else %}—{% endif %}
+            </td>
+            <td class="num" style="font-size:11px;">
+              {% if i.target_pct is not none %}
+                {{ "%.2f"|format(i.current_pct) }}% → <strong>{{ "%.2f"|format(i.target_pct) }}%</strong>
+                <div style="font-size:10px;color:{% if i.drift_pct > 0.5 %}var(--gain){% elif i.drift_pct < -0.5 %}var(--loss){% else %}var(--fg-muted){% endif %};">
+                  {% if i.drift_pct > 0 %}欠 {{ "%.2f"|format(i.drift_pct) }}%{% elif i.drift_pct < 0 %}超 {{ "%.2f"|format(-i.drift_pct) }}%{% else %}持平{% endif %}
+                </div>
+              {% else %}
+                <span style="color:var(--fg-muted);">{{ "%.2f"|format(i.current_pct) }}%</span>
+                <div style="font-size:10px;color:var(--fg-muted);">未设目标</div>
+              {% endif %}
             </td>
             <td style="font-size:12px;color:var(--fg-muted);max-width:380px;">{{ i.rationale }}</td>
           </tr>
