@@ -1,6 +1,18 @@
 {% extends "base.html" %}
 {% block title %}运行历史{% endblock %}
-{% block extra_head %}<meta http-equiv="refresh" content="10">{% endblock %}
+{% block extra_head %}
+<meta http-equiv="refresh" content="10">
+<style>
+.truncate {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+.truncate:hover { white-space: normal; word-break: break-word; }
+</style>
+{% endblock %}
 
 {% block content %}
   <h1>🏃 运行历史</h1>
@@ -24,8 +36,12 @@
         <tr>
           <td><code>{{ r.run_id }}</code></td>
           <td>{{ r.badge }}</td>
-          <td style="font-size:12px;">{{ r.tickers or "—" }}</td>
-          <td style="font-size:12px;color:var(--fg-muted);max-width:280px;word-break:break-word;">{{ r.instruction or "—" }}</td>
+          <td style="font-size:12px;">
+            <span class="truncate" title="{{ r.tickers }}">{{ r.tickers or "—" }}</span>
+          </td>
+          <td style="font-size:12px;color:var(--fg-muted);">
+            <span class="truncate" title="{{ r.instruction }}">{{ r.instruction or "—" }}</span>
+          </td>
           <td style="font-size:11px;color:var(--fg-muted);">{{ r.last_line[:80] }}</td>
           <td style="white-space:nowrap;">
             <a href="/runs/{{ r.run_id }}" class="btn small secondary">日志</a>

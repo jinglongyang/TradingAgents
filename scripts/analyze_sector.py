@@ -37,6 +37,7 @@ import yfinance as yf  # noqa: E402
 
 from tradingagents.default_config import DEFAULT_CONFIG  # noqa: E402
 from tradingagents.llm_clients import create_llm_client  # noqa: E402
+from tradingagents.portfolio_db import connect, latest_snapshot_date  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("analyze_sector")
@@ -51,13 +52,33 @@ Requirements:
 - Cover both established leaders and high-quality growth names where applicable.
 - Include the actual ticker symbol (e.g. NVDA, GOOGL), not the company name.
 - Avoid ETFs unless the query specifically asks for one.
-
+{user_block}
 Return ONLY a JSON array of ticker strings, nothing else. Example:
 ["NVDA", "AMD", "AVGO", "TSM", "INTC"]"""
 
 
-def get_sector_tickers(sector: str, max_tickers: int) -> list[str]:
-    """Ask the quick-thinking LLM to enumerate tickers, then validate."""
+def load_user_holdings() -> list[tuple[str, str]]:
+    """Return (symbol, sector) for every ticker in the latest snapshot."""
+    latest = latest_snapshot_date()
+    if not latest:
+        return []
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT ps.symbol AS symbol, COALESCE(t.sector, '') AS sector
+              FROM positions_snapshot ps
+              LEFT JOIN tickers t ON t.symbol = ps.symbol
+             WHERE ps.import_date = ?
+            """,
+            (latest,),
+        ).fetchall()
+    return [(r["symbol"], r["sector"]) for r in rows]
+
+
+def llm_filter_relevant_holdings(sector: str, holdings: list[tuple[str, str]]) -> list[str]:
+    """Ask the LLM which user holdings are relevant to the theme."""
+    if not holdings:
+        return []
     config = DEFAULT_CONFIG.copy()
     client = create_llm_client(
         provider=config["llm_provider"],
@@ -65,10 +86,56 @@ def get_sector_tickers(sector: str, max_tickers: int) -> list[str]:
         base_url=config.get("backend_url"),
     )
     llm = client.get_llm()
-    resp = llm.invoke(TICKER_PROMPT.format(sector=sector))
+    holdings_str = ", ".join(f"{s}({sec})" if sec else s for s, sec in holdings)
+    prompt = (
+        f'The user holds these tickers (ticker(sector)): {holdings_str}\n\n'
+        f'Which of these are CORE plays on the theme "{sector}"?\n\n'
+        f'Be STRICT — only include tickers whose primary business is the theme. '
+        f'Reject anything that\'s only tangentially related (e.g. don\'t include AAPL '
+        f'for an "AI chip" theme just because Apple uses chips). For "AI infrastructure" '
+        f'/ "memory" / "storage" themes specifically, include semiconductor IP / chip / '
+        f'memory / NAND / HDD / data-center direct plays — not general software, not '
+        f'adtech, not crypto.\n\n'
+        f'Return a JSON array of AT MOST 5 tickers, e.g. ["MU", "SNDK", "DRAM"]. '
+        f'Return [] if nothing is a core fit.'
+    )
+    try:
+        resp = llm.invoke(prompt)
+        content = resp.content if isinstance(resp.content, str) else str(resp.content)
+        m = re.search(r"\[([^\]]*)\]", content)
+        if not m:
+            return []
+        try:
+            raw = json.loads("[" + m.group(1) + "]")
+        except json.JSONDecodeError:
+            raw = [t.strip().strip('"').strip("'") for t in m.group(1).split(",")]
+        held_set = {s for s, _ in holdings}
+        return [t.upper() for t in raw if isinstance(t, str) and t.strip().upper() in held_set]
+    except Exception as e:
+        log.warning("Holding-relevance filter failed: %s", e)
+        return []
+
+
+def get_sector_tickers(sector: str, max_tickers: int) -> list[str]:
+    """Ask LLM to enumerate tickers, then validate. Also surfaces any of the
+    user's existing holdings that are relevant to the theme so we never silently
+    miss something they already own (e.g. SNDK after the WDC spin-off, or DRAM ETF)."""
+    config = DEFAULT_CONFIG.copy()
+    client = create_llm_client(
+        provider=config["llm_provider"],
+        model=config["quick_think_llm"],
+        base_url=config.get("backend_url"),
+    )
+    llm = client.get_llm()
+
+    holdings = load_user_holdings()
+    # Pass 1 prompt should NOT bias the LLM toward existing holdings — sector
+    # analysis is mostly about discovering new ideas. We surface held tickers
+    # via a separate pass below so we never silently drop them either.
+    user_block = ""
+    resp = llm.invoke(TICKER_PROMPT.format(sector=sector, user_block=user_block))
     content = resp.content if isinstance(resp.content, str) else str(resp.content)
 
-    # Extract JSON array
     m = re.search(r"\[([^\]]+)\]", content)
     if not m:
         log.error("LLM did not return JSON array: %s", content[:200])
@@ -77,15 +144,26 @@ def get_sector_tickers(sector: str, max_tickers: int) -> list[str]:
     try:
         raw = json.loads("[" + m.group(1) + "]")
     except json.JSONDecodeError:
-        # Fallback: split by comma and strip quotes
         raw = [t.strip().strip('"').strip("'") for t in m.group(1).split(",")]
 
     candidates = [t.upper() for t in raw if isinstance(t, str) and t.strip()]
     log.info("LLM proposed %d tickers: %s", len(candidates), candidates)
 
-    # Validate via yfinance
+    # Second pass: catch user holdings the first pass missed (LLM knowledge
+    # cutoff for recent IPOs / spin-offs, ETF exclusion rule, etc.). These get
+    # APPENDED — not prepended — because the whole point of sector analysis is
+    # to surface fresh ideas, not just analyze what's already owned.
+    relevant_held = llm_filter_relevant_holdings(sector, holdings)
+    cand_set = {t.upper() for t in candidates}
+    missing_held = [t for t in relevant_held if t.upper() not in cand_set]
+    if missing_held:
+        log.info("Adding %d held tickers LLM missed: %s", len(missing_held), missing_held)
+
+    merged = candidates + missing_held
+    effective_cap = max_tickers + len(missing_held)  # never displace LLM picks
+
     validated = []
-    for t in candidates[:max_tickers + 3]:  # over-fetch to allow failures
+    for t in merged:
         try:
             info = yf.Ticker(t).history(period="5d")
             if len(info) > 0:
@@ -94,10 +172,10 @@ def get_sector_tickers(sector: str, max_tickers: int) -> list[str]:
                 log.warning("Ticker %s has no recent price data, skipping", t)
         except Exception as e:
             log.warning("Ticker %s validation failed: %s", t, e)
-        if len(validated) >= max_tickers:
+        if len(validated) >= effective_cap:
             break
 
-    log.info("Validated tickers: %s", validated)
+    log.info("Validated tickers (cap=%d): %s", effective_cap, validated)
     return validated
 
 
@@ -181,7 +259,10 @@ def collect_summary(tickers: list[str], sector: str, out_dir: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--sector", required=True, help="Sector / theme query (Chinese OK)")
-    parser.add_argument("--max-tickers", type=int, default=8)
+    # Default 10 to match the prompt's "5 to 10" guidance. The validator already
+    # has effective_cap = max_tickers + len(missing_held) so this is the LLM
+    # picks ceiling specifically — held additions stack on top.
+    parser.add_argument("--max-tickers", type=int, default=10)
     parser.add_argument("--trade-date", default="2026-05-08")
     parser.add_argument("--out-dir", type=Path, default=Path("outputs"))
     args = parser.parse_args()
