@@ -242,6 +242,8 @@ def _render(message: str = ""):
     <a class="btn secondary" href="/decisions">📋 PM 分析</a>
     <a class="btn secondary" href="/thesis-evolution">📈 Thesis 演变</a>
     <a class="btn secondary" href="/charts">📊 Charts</a>
+    <a class="btn secondary" href="/sectors">🌐 板块轮动</a>
+    <a class="btn secondary" href="/performance">🎯 PM 准确度</a>
     <a class="btn secondary" href="/runs">🏃 运行历史</a>
     <a class="btn secondary" href="/executions">📒 交易记录</a>
     <a class="btn secondary" href="/api/positions" target="_blank">View JSON</a>
@@ -1284,6 +1286,248 @@ def drift_view():
 .tag-underweight {{ background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }}
 .tag-sell {{ background: color-mix(in srgb, var(--danger) 30%, transparent); color: var(--danger); }}
 </style></head><body><div class="container">
+{''.join(body)}
+</div></body></html>"""
+
+
+@app.get("/performance", response_class=HTMLResponse)
+def performance_view(windows: str = "5,30,90"):
+    """PM forward-test: actual return + alpha vs SPY for each decision."""
+    import yfinance as yf
+    from datetime import datetime as _dt, timedelta as _td
+
+    try:
+        window_days = [int(w) for w in windows.split(",") if w.strip()]
+    except ValueError:
+        window_days = [5, 30, 90]
+
+    with connect() as conn:
+        decisions = conn.execute(
+            "SELECT trade_date, symbol, rating FROM decisions ORDER BY trade_date, symbol"
+        ).fetchall()
+
+    if not decisions:
+        return HTMLResponse("<p>No decisions yet</p><a href='/'>← Back</a>")
+
+    def alpha(t: str, d: str, days: int):
+        try:
+            start = _dt.strptime(d, "%Y-%m-%d")
+            end_s = (start + _td(days=days + 7)).strftime("%Y-%m-%d")
+            stk = yf.Ticker(t).history(start=d, end=end_s)
+            spy = yf.Ticker("SPY").history(start=d, end=end_s)
+            if len(stk) < 2 or len(spy) < 2:
+                return None, None
+            di = min(days, len(stk) - 1, len(spy) - 1)
+            raw = float((stk["Close"].iloc[di] - stk["Close"].iloc[0]) / stk["Close"].iloc[0])
+            spy_r = float((spy["Close"].iloc[di] - spy["Close"].iloc[0]) / spy["Close"].iloc[0])
+            return raw, raw - spy_r
+        except Exception:
+            return None, None
+
+    def classify(rating: str, a):
+        if a is None:
+            return "pending"
+        bullish = rating in ("Buy", "Overweight")
+        bearish = rating in ("Underweight", "Sell")
+        if bullish and a > 0.005:
+            return "hit"
+        if bearish and a < -0.005:
+            return "hit"
+        if rating == "Hold" and abs(a) < 0.02:
+            return "hit"
+        return "miss"
+
+    rows = []
+    for d in decisions:
+        row = {"symbol": d["symbol"], "trade_date": d["trade_date"], "rating": d["rating"]}
+        for w in window_days:
+            raw, a = alpha(d["symbol"], d["trade_date"], w)
+            row[f"raw_{w}"] = raw
+            row[f"alpha_{w}"] = a
+            row[f"hit_{w}"] = classify(d["rating"], a)
+        rows.append(row)
+
+    # Aggregate hit rate per rating × window
+    summary = {}
+    for rating in ["Buy", "Overweight", "Hold", "Underweight", "Sell"]:
+        summary[rating] = {}
+        rs = [r for r in rows if r["rating"] == rating]
+        for w in window_days:
+            settled = [r for r in rs if r[f"hit_{w}"] != "pending"]
+            hits = sum(1 for r in settled if r[f"hit_{w}"] == "hit")
+            summary[rating][w] = (hits, len(settled))
+
+    body = [
+        '<h1>🎯 PM 准确度跟踪</h1>',
+        '<p class="subtitle">每个 PM 决策 vs SPY 的实际 alpha · 多窗口窗口</p>',
+        '<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>',
+    ]
+    body.append(f'<div class="status">📊 跟踪 {len(decisions)} 个决策 · 窗口: {", ".join(f"{w}d" for w in window_days)}</div>')
+
+    # Aggregate table
+    body.append('<h2>命中率汇总</h2>')
+    body.append('<table><thead><tr><th>评级</th>' + ''.join(f'<th class="num">{w}d</th>' for w in window_days) + '</tr></thead><tbody>')
+    for rating in ["Buy", "Overweight", "Hold", "Underweight", "Sell"]:
+        cells = [f'<td><span class="tag tag-{rating.lower()}" style="padding:2px 8px;">{rating}</span></td>']
+        for w in window_days:
+            hits, total = summary[rating][w]
+            if total == 0:
+                cells.append('<td class="num" style="color:var(--fg-muted);">pending</td>')
+            else:
+                pct = hits / total * 100
+                cls = "gain" if pct >= 60 else "loss" if pct < 40 else ""
+                cells.append(f'<td class="num {cls}">{hits}/{total} ({pct:.0f}%)</td>')
+        body.append('<tr>' + ''.join(cells) + '</tr>')
+    body.append('</tbody></table>')
+
+    # Per-decision details
+    body.append(f'<h2 style="margin-top:32px;">每只决策详情</h2>')
+    body.append('<table><thead><tr><th>Ticker</th><th>评级</th><th>日期</th>'
+                + ''.join(f'<th class="num">{w}d Raw / Alpha</th>' for w in window_days)
+                + ''.join(f'<th>{w}d Hit?</th>' for w in window_days)
+                + '</tr></thead><tbody>')
+    for r in rows:
+        cells = [
+            f'<td><strong>{r["symbol"]}</strong></td>',
+            f'<td><span class="tag tag-{r["rating"].lower()}" style="padding:2px 8px;">{r["rating"]}</span></td>',
+            f'<td>{r["trade_date"]}</td>',
+        ]
+        for w in window_days:
+            raw = r[f"raw_{w}"]
+            a = r[f"alpha_{w}"]
+            if raw is None:
+                cells.append('<td class="num" style="color:var(--fg-muted);">⏳ pending</td>')
+            else:
+                cls = "gain" if a > 0 else "loss"
+                cells.append(f'<td class="num {cls}">{raw*100:+.2f}% / {a*100:+.2f}%</td>')
+        for w in window_days:
+            hit = r[f"hit_{w}"]
+            emoji = {"hit": "✅", "miss": "❌", "pending": "⏳"}[hit]
+            cells.append(f'<td>{emoji}</td>')
+        body.append('<tr>' + ''.join(cells) + '</tr>')
+    body.append('</tbody></table>')
+
+    body.append('''
+<details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-top:24px;border:1px solid var(--border);">
+<summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 怎么读这表</summary>
+<ul style="margin-top:12px;font-size:13px;line-height:1.7;">
+<li><strong>Raw</strong>：该 ticker 从 trade_date 起 N 天的实际涨跌。</li>
+<li><strong>Alpha</strong>：减去同期 SPY 涨跌 — 衡量超额收益。</li>
+<li><strong>Hit?</strong>：评级方向与 alpha 方向是否一致。Buy/Overweight 看 alpha > +0.5%；Underweight/Sell 看 alpha < -0.5%；Hold 看 |alpha| < 2%。</li>
+<li><strong>命中率参考</strong>：&gt;60% 算好（绿）；&lt;40% 算差（红）。50% = 随机。</li>
+<li><strong>注意</strong>：决策刚做时（5 月 8 日）所有 5d 窗口都 pending（要到 5/15 才有数据）。30d / 90d 窗口还要等。</li>
+</ul>
+</details>
+''')
+
+    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PM 准确度</title><style>{CSS}
+.tag-buy {{ background: color-mix(in srgb, var(--success) 30%, transparent); color: var(--success); }}
+.tag-overweight {{ background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); }}
+.tag-hold {{ background: var(--border); color: var(--fg-muted); }}
+.tag-underweight {{ background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }}
+.tag-sell {{ background: color-mix(in srgb, var(--danger) 30%, transparent); color: var(--danger); }}
+</style></head><body><div class="container">
+{''.join(body)}
+</div></body></html>"""
+
+
+@app.get("/sectors", response_class=HTMLResponse)
+def sectors_view():
+    """Sector ETF performance dashboard (XLK/XLV/XLF/...) — rotation signals."""
+    import yfinance as yf
+
+    SECTORS = [
+        ("XLK", "Technology", "🖥️"),
+        ("XLV", "Health Care", "🏥"),
+        ("XLF", "Financials", "🏦"),
+        ("XLY", "Consumer Discretionary", "🛍️"),
+        ("XLP", "Consumer Staples", "🛒"),
+        ("XLI", "Industrials", "🏭"),
+        ("XLE", "Energy", "⛽"),
+        ("XLB", "Materials", "⛏️"),
+        ("XLU", "Utilities", "💡"),
+        ("XLRE", "Real Estate", "🏢"),
+        ("XLC", "Communication Services", "📡"),
+        ("SPY", "S&P 500 (benchmark)", "📊"),
+    ]
+
+    results = []
+    for symbol, name, emoji in SECTORS:
+        try:
+            hist = yf.Ticker(symbol).history(period="6mo")
+            if len(hist) < 2:
+                continue
+            latest = float(hist["Close"].iloc[-1])
+            # Various lookbacks
+            def pct(days: int) -> float | None:
+                if len(hist) < days + 1:
+                    return None
+                past = float(hist["Close"].iloc[-1 - days])
+                return (latest - past) / past * 100 if past else None
+            d1 = pct(1)
+            d5 = pct(5)
+            d30 = pct(22)  # ~30 calendar = ~22 trading
+            d90 = pct(66)
+            results.append({
+                "symbol": symbol, "name": name, "emoji": emoji,
+                "latest": latest, "d1": d1, "d5": d5, "d30": d30, "d90": d90,
+            })
+        except Exception:
+            continue
+
+    if not results:
+        return HTMLResponse("<p>yfinance 拉取失败</p><a href='/'>← Back</a>")
+
+    spy_d30 = next((r["d30"] for r in results if r["symbol"] == "SPY"), 0) or 0
+    spy_d90 = next((r["d90"] for r in results if r["symbol"] == "SPY"), 0) or 0
+
+    body = ['<h1>🌐 行业 ETF 轮动</h1>',
+            '<p class="subtitle">11 个 SPDR 行业 ETF + SPY 基准 · 多窗口涨跌</p>',
+            '<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>',
+            '<table><thead><tr><th>ETF</th><th>板块</th><th class="num">最新价</th><th class="num">1d</th><th class="num">5d</th><th class="num">30d</th><th class="num">90d</th><th class="num">30d vs SPY</th><th class="num">90d vs SPY</th></tr></thead><tbody>']
+
+    def cls(v):
+        if v is None: return ""
+        return "gain" if v > 0 else "loss"
+    def fmt(v):
+        if v is None: return "—"
+        return f"{v:+.2f}%"
+
+    # Sort by 30d performance descending (top performers first)
+    for r in sorted(results, key=lambda x: -(x["d30"] or -999)):
+        is_spy = r["symbol"] == "SPY"
+        rel30 = (r["d30"] - spy_d30) if r["d30"] is not None else None
+        rel90 = (r["d90"] - spy_d90) if r["d90"] is not None else None
+        row_style = ' style="background:var(--bg-subtle);font-weight:600;"' if is_spy else ''
+        body.append(
+            f'<tr{row_style}><td>{r["emoji"]} <strong>{r["symbol"]}</strong></td>'
+            f'<td>{r["name"]}</td>'
+            f'<td class="num">${r["latest"]:.2f}</td>'
+            f'<td class="num {cls(r["d1"])}">{fmt(r["d1"])}</td>'
+            f'<td class="num {cls(r["d5"])}">{fmt(r["d5"])}</td>'
+            f'<td class="num {cls(r["d30"])}">{fmt(r["d30"])}</td>'
+            f'<td class="num {cls(r["d90"])}">{fmt(r["d90"])}</td>'
+            f'<td class="num {cls(rel30)}">{fmt(rel30)}</td>'
+            f'<td class="num {cls(rel90)}">{fmt(rel90)}</td>'
+            f'</tr>'
+        )
+    body.append('</tbody></table>')
+
+    body.append('''
+<details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-top:24px;border:1px solid var(--border);">
+<summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 怎么读这张表</summary>
+<ul style="margin-top:12px;font-size:13px;line-height:1.7;">
+<li><strong>"30d vs SPY"</strong>：板块超额收益（相对大盘）。正数 = 板块跑赢，负数 = 跑输。</li>
+<li><strong>板块轮动信号</strong>：30d 排名前 3 + 90d 也前 3 → 强势板块；30d 前 3 但 90d 后 3 → 反弹但短期，慎入。</li>
+<li><strong>防御 vs 进攻</strong>：XLU/XLP/XLV 跑赢 → 市场避险；XLK/XLY/XLF 跑赢 → 风险偏好。</li>
+<li><strong>对你组合的影响</strong>：你 ~80% 集中在 XLK（科技）领域。如果科技 30d 跑输 SPY → 组合大概率跑输大盘。</li>
+</ul>
+</details>
+''')
+
+    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>板块轮动</title><style>{CSS}</style></head><body><div class="container">
 {''.join(body)}
 </div></body></html>"""
 
