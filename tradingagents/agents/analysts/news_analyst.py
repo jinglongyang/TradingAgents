@@ -30,6 +30,8 @@ def create_news_analyst(llm):
             " (2) SECOND call web_search_news(query=\"<TICKER> latest earnings <YEAR>\") for the market reaction and analyst commentary on those events."
             " (3) THIRD call web_search_news(query=\"<TICKER> strategic investment partnership financing rating <YEAR>\") to specifically surface large equity investments,"
             " term loan facilities, credit rating actions (S&P, Moody's, Fitch upgrades/downgrades), and partnership announcements."
+            " (3a) FOURTH call web_search_news(query=\"<TICKER> Q1 Q2 Q3 Q4 <YEAR> earnings call transcript management guidance\") to capture management Q&A commentary and forward guidance."
+            " The Q&A section often reveals concerns the prepared remarks gloss over (CFO hedging on capex, CEO refusing to reaffirm guidance)."
             " (4) ONLY AFTER the above, call get_news / get_global_news for additional structured context."
             " Anchor every factual claim — every dollar figure, every date, every rating action — to a tool call result."
             " Do NOT fabricate numbers or events. If web_search or SEC returns nothing on a topic, say so explicitly."

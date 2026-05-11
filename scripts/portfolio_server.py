@@ -225,6 +225,7 @@ def _render(message: str = ""):
   <div class="toolbar">
     <button onclick="openModal('add-modal')">➕ 添加新持仓</button>
     <a class="btn secondary" href="/owners">👥 按 Owner 看</a>
+    <a class="btn secondary" href="/drift">⚠️ Drift Alert</a>
     <a class="btn secondary" href="/decisions">📋 PM 分析 & 评级</a>
     <a class="btn secondary" href="/executions">📒 交易记录</a>
     <a class="btn secondary" href="/api/positions" target="_blank">View JSON</a>
@@ -543,6 +544,109 @@ def sell(
     except Exception as e:  # noqa: BLE001
         msg = f'<div class="msg error">✗ 错误: {e}</div>'
     return _render(message=msg)
+
+
+@app.get("/drift", response_class=HTMLResponse)
+def drift_view():
+    """Position-vs-rating drift: where current weight conflicts with PM rating."""
+    latest = latest_snapshot_date()
+    with connect() as conn:
+        positions = conn.execute(
+            "SELECT symbol, SUM(current_value) v FROM positions_snapshot WHERE import_date = ? GROUP BY symbol",
+            (latest,) if latest else (date.today().isoformat(),),
+        ).fetchall()
+        decisions = {
+            r["symbol"]: r["rating"]
+            for r in conn.execute("SELECT symbol, rating FROM decisions").fetchall()
+        }
+
+    total = sum(p["v"] for p in positions)
+
+    # Score each holding's drift
+    # Bullish ratings (Buy/Overweight) → fine to have high weight, ALERT if very low
+    # Bearish ratings (Underweight/Sell) → ALERT if weight is high
+    # Hold → no drift alert
+    rows = []
+    for p in positions:
+        sym = p["symbol"]
+        value = p["v"]
+        weight = value / total * 100 if total else 0
+        rating = decisions.get(sym, "—")
+        drift_score = 0.0
+        action = ""
+        if rating in ("Underweight", "Sell"):
+            # The higher the weight, the more urgent the trim
+            drift_score = weight  # purely weight-driven
+            if rating == "Sell" and weight > 0.5:
+                action = "🔴 紧迫减仓"
+            elif weight > 2:
+                action = "🟡 应减仓"
+            elif weight > 0.5:
+                action = "🟢 已小仓位"
+        elif rating in ("Buy", "Overweight"):
+            # Too small (<0.5%) suggests Buy is underutilized
+            if weight < 0.5:
+                drift_score = 1.0 - weight / 0.5  # higher when smaller
+                action = "🔵 加仓空间"
+            elif weight < 1.5:
+                action = "🟢 适度"
+            else:
+                action = "✓ 充分"
+        elif rating == "Hold":
+            action = "—"
+        else:
+            action = "❓ 未分析"
+
+        rows.append({
+            "symbol": sym, "value": value, "weight": weight,
+            "rating": rating, "drift_score": drift_score, "action": action,
+        })
+
+    # Sort: most urgent first (Sells with high weight, then Underweights with high weight, then Buys with very low weight)
+    def priority(r):
+        rating_priority = {"Sell": 0, "Underweight": 1, "Buy": 2, "Overweight": 3, "Hold": 4}.get(r["rating"], 5)
+        return (rating_priority, -r["drift_score"])
+    rows.sort(key=priority)
+
+    body = [
+        '<h1>⚠️ Position Drift Alert</h1>',
+        '<p class="subtitle">PM 评级 vs 当前组合权重的错配 — 越靠前越紧迫</p>',
+        '<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>',
+        '''<details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-bottom:16px;border:1px solid var(--border);">
+<summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 如何读这个表</summary>
+<ul style="margin-top:12px;font-size:13px;color:var(--fg-muted);">
+<li>🔴 <strong>紧迫减仓</strong>：PM 评级 Sell 且组合权重 > 0.5%</li>
+<li>🟡 <strong>应减仓</strong>：PM 评级 Underweight 且权重 > 2%</li>
+<li>🔵 <strong>加仓空间</strong>：PM 评级 Buy/Overweight 但当前权重 < 0.5%</li>
+<li>✓ <strong>充分</strong>：Buy/Overweight 且权重 > 1.5%（已合理配置）</li>
+<li>— <strong>Hold</strong>：评级中性，不需 drift action</li>
+</ul>
+</details>''',
+        '<table><thead><tr><th>Ticker</th><th>评级</th><th class="num">当前价值</th><th class="num">组合权重</th><th>Drift 状态</th></tr></thead><tbody>',
+    ]
+    for r in rows:
+        weight_class = ""
+        if r["weight"] > 15: weight_class = "loss"
+        elif r["weight"] < 0.3 and r["rating"] in ("Buy", "Overweight"): weight_class = "loss"
+        body.append(
+            f'<tr><td><strong>{r["symbol"]}</strong></td>'
+            f'<td><span class="tag tag-{r["rating"].lower()}" style="padding:2px 8px;">{r["rating"]}</span></td>'
+            f'<td class="num">${r["value"]:,.0f}</td>'
+            f'<td class="num {weight_class}">{r["weight"]:.2f}%</td>'
+            f'<td>{r["action"]}</td></tr>'
+        )
+    body.append('</tbody></table>')
+
+    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Drift Alert</title><style>{CSS}
+.tag-buy {{ background: color-mix(in srgb, var(--success) 30%, transparent); color: var(--success); }}
+.tag-overweight {{ background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); }}
+.tag-hold {{ background: var(--border); color: var(--fg-muted); }}
+.tag-underweight {{ background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }}
+.tag-sell {{ background: color-mix(in srgb, var(--danger) 30%, transparent); color: var(--danger); }}
+</style></head><body><div class="container">
+{''.join(body)}
+</div></body></html>"""
 
 
 @app.get("/owners", response_class=HTMLResponse)
