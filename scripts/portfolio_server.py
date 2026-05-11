@@ -117,6 +117,7 @@ function openAccountEdit(acctId, acctName, currentBroker, currentType, currentOw
     document.getElementById('acct-edit-type-select').value = currentType || 'Taxable';
     document.getElementById('acct-edit-owner-input').value = currentOwner || 'Self';
     document.getElementById('acct-edit-title').textContent = `编辑账户: ${acctName}`;
+    document.getElementById('acct-delete-id').value = acctId;
     openModal('acct-edit-modal');
 }
 function openEdit(snapshotId, sym, qty, price, cost, broker) {
@@ -416,6 +417,15 @@ function toggleRunMode(mode) {{
         <button type="submit">应用到所有行</button>
       </div>
     </form>
+    <hr style="margin:20px 0;border:none;border-top:1px solid var(--border);">
+    <details>
+      <summary style="cursor:pointer;color:var(--danger);font-size:13px;">⚠️ 危险区域 — 删除整个账户</summary>
+      <p style="font-size:12px;color:var(--fg-muted);margin-top:10px;">删除该账户的所有持仓行。<strong>不影响已记录的交易（executions）</strong>。如果是 CSV import 进来的，下次 import-csv 会重新添加。</p>
+      <form method="post" action="/account-delete" onsubmit="return confirm('确认删除此账户的所有持仓行吗？此操作只删持仓，不影响交易记录。')" style="margin-top:8px;">
+        <input type="hidden" id="acct-delete-id" name="account_id">
+        <button type="submit" class="danger" style="width:100%;">🗑️ 删除整个账户</button>
+      </form>
+    </details>
   </div>
 </div>
 
@@ -490,6 +500,22 @@ def add(
                 (owner.strip(), account_id.strip()),
             )
         msg = f'<div class="msg success">✓ 已添加 <strong>{symbol.upper()}</strong> 到 {account_name}</div>'
+    except Exception as e:  # noqa: BLE001
+        msg = f'<div class="msg error">✗ 错误: {e}</div>'
+    return _render(message=msg)
+
+
+@app.post("/account-delete", response_class=HTMLResponse)
+def account_delete(account_id: str = Form(...)):
+    """Delete all positions_snapshot rows for an account (preserves executions)."""
+    try:
+        with connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM positions_snapshot WHERE account_id = ?",
+                (account_id,),
+            )
+            n = cur.rowcount
+        msg = f'<div class="msg success">✓ 已删除账户 <code>{account_id[:24]}</code> 的 <strong>{n}</strong> 行持仓（executions 保留）</div>'
     except Exception as e:  # noqa: BLE001
         msg = f'<div class="msg error">✗ 错误: {e}</div>'
     return _render(message=msg)
