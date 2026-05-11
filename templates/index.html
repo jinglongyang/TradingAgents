@@ -108,9 +108,9 @@
           <div class="field"><label>持股数</label><input name="quantity" type="number" step="0.001" required min="0.001"></div>
         </div>
         <div class="row">
-          <div class="field"><label>当前价 <span class="hint">留空自动从 yfinance 拉</span></label><input name="last_price" type="number" step="0.01" placeholder="留空 = 自动"></div>
+          <div class="field"><label>当前价 <span class="hint">留空自动从 yfinance 拉</span></label><input name="last_price" type="number" step="0.001" placeholder="留空 = 自动"></div>
           <div class="field"><label>每股成本 <span class="hint">Robinhood 显示这个</span></label>
-            <input name="avg_cost" type="number" step="0.01" id="add-avg-cost"
+            <input name="avg_cost" type="number" step="0.001" id="add-avg-cost"
                    oninput="document.getElementById('add-cost-total').value = (this.value * document.querySelector('#add-modal input[name=&quot;quantity&quot;]').value || 0).toFixed(2)"></div>
         </div>
         <div class="field"><label>总成本 <span class="hint">= 每股成本 × 股数，自动算；也可手填</span></label>
@@ -141,7 +141,7 @@
         <div class="field" style="color: var(--fg-muted); font-size: 13px;" id="sell-current"></div>
         <div class="row">
           <div class="field"><label>卖出股数</label><input id="sell-qty" name="shares" type="number" step="0.001" required min="0.001"></div>
-          <div class="field"><label>成交价 <span class="hint">每股</span></label><input name="price" type="number" step="0.01" required min="0"></div>
+          <div class="field"><label>成交价 <span class="hint">每股</span></label><input name="price" type="number" step="0.001" required min="0"></div>
         </div>
         <div class="field"><label>备注 <span class="hint">可选</span></label><input name="note" placeholder="如 PM Phase 1 / TLH harvest"></div>
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
@@ -272,11 +272,11 @@
           <div class="field"><label>持股数</label>
             <input id="edit-qty" name="quantity" type="number" step="0.001" required
                    oninput="const ac=document.getElementById('edit-avg-cost'); if(ac.value) document.getElementById('edit-cost').value = (ac.value * this.value || 0).toFixed(2)"></div>
-          <div class="field"><label>当前价</label><input id="edit-price" name="last_price" type="number" step="0.01"></div>
+          <div class="field"><label>当前价</label><input id="edit-price" name="last_price" type="number" step="0.001"></div>
         </div>
         <div class="row">
           <div class="field"><label>每股成本 <span class="hint">Robinhood 显示这个</span></label>
-            <input id="edit-avg-cost" type="number" step="0.01"
+            <input id="edit-avg-cost" type="number" step="0.001"
                    oninput="document.getElementById('edit-cost').value = (this.value * document.getElementById('edit-qty').value || 0).toFixed(2)"></div>
           <div class="field"><label>总成本 <span class="hint">自动算或手填</span></label>
             <input id="edit-cost" name="cost_basis_total" type="number" step="0.01"></div>
