@@ -1,41 +1,102 @@
 {% extends "base.html" %}
 {% block title %}行业 ETF 轮动{% endblock %}
+{% block extra_head %}
+<style>
+.sector-card {
+  background: var(--bg-subtle); border: 1px solid var(--border);
+  border-radius: 8px; padding: 16px; margin-bottom: 12px;
+}
+.sector-card.is-spy { border-left: 3px solid var(--accent); }
+.sector-head { display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap; }
+.sector-id { min-width: 220px; }
+.sector-id .ticker { font-size: 18px; font-weight: 600; }
+.sector-id .blurb { color: var(--fg-muted); font-size: 12px; margin-top: 2px; line-height: 1.4; }
+.sector-id .top { color: var(--fg-muted); font-size: 11px; margin-top: 6px; }
+.sector-id .top strong { color: var(--fg); }
+.sector-exposure {
+  background: var(--bg); border-radius: 6px; padding: 8px 12px;
+  font-size: 12px; line-height: 1.5; min-width: 200px;
+}
+.sector-exposure .big { font-size: 16px; font-weight: 600; color: var(--fg); }
+.perf-grid {
+  display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px 12px;
+  flex: 1; min-width: 480px; font-size: 12px;
+}
+.perf-grid .label { color: var(--fg-muted); font-size: 10px; text-transform: uppercase; }
+.perf-grid .val { font-variant-numeric: tabular-nums; font-weight: 500; }
+</style>
+{% endblock %}
 
 {% block content %}
   <h1>🌐 行业 ETF 轮动</h1>
-  <p class="subtitle">11 个 SPDR 行业 ETF + SPY 基准 · 多窗口涨跌</p>
+  <p class="subtitle">11 个 SPDR 行业 ETF + SPY 基准 · 多窗口涨跌 + 你的组合曝光</p>
   <div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>
 
-  <table>
-    <thead><tr>
-      <th>ETF</th><th>板块</th><th class="num">最新价</th>
-      <th class="num">1d</th><th class="num">5d</th><th class="num">30d</th><th class="num">90d</th>
-      <th class="num">30d vs SPY</th><th class="num">90d vs SPY</th>
-    </tr></thead>
-    <tbody>
-      {% for r in rows %}
-      <tr{% if r.is_spy %} style="background:var(--bg-subtle);font-weight:600;"{% endif %}>
-        <td>{{ r.emoji }} <strong>{{ r.symbol }}</strong></td>
-        <td>{{ r.name }}</td>
-        <td class="num">${{ "%.2f"|format(r.latest) }}</td>
-        <td class="num {{ r.cls_d1 }}">{{ r.fmt_d1 }}</td>
-        <td class="num {{ r.cls_d5 }}">{{ r.fmt_d5 }}</td>
-        <td class="num {{ r.cls_d30 }}">{{ r.fmt_d30 }}</td>
-        <td class="num {{ r.cls_d90 }}">{{ r.fmt_d90 }}</td>
-        <td class="num {{ r.cls_rel30 }}">{{ r.fmt_rel30 }}</td>
-        <td class="num {{ r.cls_rel90 }}">{{ r.fmt_rel90 }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  {% for r in rows %}
+  <div class="sector-card{% if r.is_spy %} is-spy{% endif %}">
+    <div class="sector-head">
+      <div class="sector-id">
+        <div class="ticker">{{ r.emoji }} {{ r.symbol }}</div>
+        <div class="blurb">{{ r.blurb }}</div>
+        {% if r.top_holdings %}
+          <div class="top">
+            Top 3:
+            {% for sym, w in r.top_holdings %}<strong>{{ sym }}</strong> {{ "%.1f"|format(w) }}%{% if not loop.last %} · {% endif %}{% endfor %}
+          </div>
+        {% endif %}
+      </div>
+
+      {% if r.gics %}
+        <div class="sector-exposure">
+          <div style="color:var(--fg-muted);font-size:11px;">你的曝光</div>
+          {% if r.exposure_total %}
+            <div class="big">${{ "{:,.0f}".format(r.exposure_total) }}</div>
+            <div>{{ "%.1f"|format(r.exposure_pct) }}% 组合 · {{ r.exposure_n }} 只</div>
+          {% else %}
+            <div class="big" style="color:var(--fg-muted);">$0</div>
+            <div style="color:var(--fg-muted);">未持有该板块</div>
+          {% endif %}
+        </div>
+      {% endif %}
+
+      <div class="perf-grid">
+        <div class="label">最新价</div>
+        <div class="label">1d</div>
+        <div class="label">5d</div>
+        <div class="label">30d</div>
+        <div class="label">90d</div>
+        <div class="label">YTD</div>
+        <div class="label">1y</div>
+
+        <div class="val">${{ "%.2f"|format(r.latest) }}</div>
+        <div class="val {{ r.cls_d1 }}">{{ r.fmt_d1 }}</div>
+        <div class="val {{ r.cls_d5 }}">{{ r.fmt_d5 }}</div>
+        <div class="val {{ r.cls_d30 }}">{{ r.fmt_d30 }}</div>
+        <div class="val {{ r.cls_d90 }}">{{ r.fmt_d90 }}</div>
+        <div class="val {{ r.cls_ytd }}">{{ r.fmt_ytd }}</div>
+        <div class="val {{ r.cls_d365 }}">{{ r.fmt_d365 }}</div>
+
+        {% if not r.is_spy %}
+        <div class="label">30d vs SPY</div>
+        <div class="label">90d vs SPY</div>
+        <div></div><div></div><div></div><div></div><div></div>
+        <div class="val {{ r.cls_rel30 }}">{{ r.fmt_rel30 }}</div>
+        <div class="val {{ r.cls_rel90 }}">{{ r.fmt_rel90 }}</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
 
   <details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-top:24px;border:1px solid var(--border);">
     <summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 怎么读这张表</summary>
     <ul style="margin-top:12px;font-size:13px;line-height:1.7;">
-      <li><strong>"30d vs SPY"</strong>：板块超额收益（相对大盘）。正数 = 板块跑赢，负数 = 跑输。</li>
-      <li><strong>板块轮动信号</strong>：30d 排名前 3 + 90d 也前 3 → 强势板块；30d 前 3 但 90d 后 3 → 反弹但短期，慎入。</li>
-      <li><strong>防御 vs 进攻</strong>：XLU/XLP/XLV 跑赢 → 市场避险；XLK/XLY/XLF 跑赢 → 风险偏好。</li>
-      <li><strong>对你组合的影响</strong>：你 ~80% 集中在 XLK（科技）领域。如果科技 30d 跑输 SPY → 组合大概率跑输大盘。</li>
+      <li><strong>每张卡 = 一个 SPDR 行业 ETF</strong>。每个 ETF 包一篮子该行业大公司 — 比单只更分散。</li>
+      <li><strong>Top 3</strong>：该 ETF 的前 3 大持股 — 看完就知道 "XLK 主要赌 NVDA/AAPL/MSFT"。</li>
+      <li><strong>你的曝光</strong>：通过 ticker 行业映射，算出你的组合在该板块的总 $ + 占比。0% 意味着你完全没暴露在该行业；&gt;30% 意味着集中。</li>
+      <li><strong>30d vs SPY</strong>：板块超额收益（相对大盘）。正 = 板块跑赢；负 = 跑输。</li>
+      <li><strong>板块轮动信号</strong>：30d &amp; 90d 都跑赢 SPY → 强势；只 30d 跑赢但 90d 跑输 → 短期反弹要警惕。</li>
+      <li><strong>防御 vs 进攻</strong>：XLU / XLP / XLV 跑赢 → 市场避险；XLK / XLY / XLF 跑赢 → 风险偏好上升。</li>
     </ul>
   </details>
 {% endblock %}

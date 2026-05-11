@@ -1222,46 +1222,99 @@ def performance_view(windows: str = "1,5,30,90"):
     )
 
 
+_SECTOR_ETFS = [
+    # (symbol, English name, emoji, plain-language description, GICS sector key
+    # that matches the values stored in tickers.sector)
+    ("XLK", "Technology", "🖥️", "大型科技股（半导体 / 软件 / 硬件）", "Technology"),
+    ("XLV", "Health Care", "🏥", "大型医药 / 生物科技 / 医疗器械", "Healthcare"),
+    ("XLF", "Financials", "🏦", "大型银行 / 保险 / 资管", "Financial Services"),
+    ("XLY", "Consumer Discretionary", "🛍️", "非必需消费（汽车 / 零售 / 旅游）", "Consumer Cyclical"),
+    ("XLP", "Consumer Staples", "🛒", "必需消费（食品 / 日用品 / 烟酒）", "Consumer Defensive"),
+    ("XLI", "Industrials", "🏭", "工业（航空 / 国防 / 工程）", "Industrials"),
+    ("XLE", "Energy", "⛽", "能源（石油 / 天然气 / 油服）", "Energy"),
+    ("XLB", "Materials", "⛏️", "原材料（化工 / 金属 / 林业）", "Basic Materials"),
+    ("XLU", "Utilities", "💡", "公用事业（电力 / 水务 / 天然气）", "Utilities"),
+    ("XLRE", "Real Estate", "🏢", "房地产 REIT（商办 / 数据中心 / 仓储）", "Real Estate"),
+    ("XLC", "Communication Services", "📡", "通信（社交 / 流媒体 / 电信）", "Communication Services"),
+    ("SPY", "S&P 500 (benchmark)", "📊", "标普 500 大盘基准（参考线）", None),
+]
+
+
 @app.get("/sectors", response_class=HTMLResponse)
 def sectors_view():
-    """Sector ETF performance dashboard (XLK/XLV/XLF/...) — rotation signals."""
+    """Sector ETF performance dashboard with portfolio exposure + top holdings."""
     import yfinance as yf
 
-    SECTORS = [
-        ("XLK", "Technology", "🖥️"),
-        ("XLV", "Health Care", "🏥"),
-        ("XLF", "Financials", "🏦"),
-        ("XLY", "Consumer Discretionary", "🛍️"),
-        ("XLP", "Consumer Staples", "🛒"),
-        ("XLI", "Industrials", "🏭"),
-        ("XLE", "Energy", "⛽"),
-        ("XLB", "Materials", "⛏️"),
-        ("XLU", "Utilities", "💡"),
-        ("XLRE", "Real Estate", "🏢"),
-        ("XLC", "Communication Services", "📡"),
-        ("SPY", "S&P 500 (benchmark)", "📊"),
-    ]
+    # 1. Per-sector portfolio exposure (sum of holdings whose tickers.sector
+    # matches this ETF's GICS sector).
+    latest = latest_snapshot_date()
+    sector_exposure: dict[str, dict] = {}
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT t.sector AS sector, ps.symbol AS symbol,
+                   SUM(ps.quantity * COALESCE(t.last_price, ps.last_price)) AS value
+              FROM positions_snapshot ps
+              LEFT JOIN tickers t ON t.symbol = ps.symbol
+             WHERE ps.import_date = ?
+             GROUP BY t.sector, ps.symbol
+            """,
+            (latest or date.today().isoformat(),),
+        ).fetchall()
+    grand_total = sum((r["value"] or 0) for r in rows)
+    for r in rows:
+        sec = r["sector"] or "Unknown"
+        slot = sector_exposure.setdefault(sec, {"total": 0.0, "tickers": []})
+        slot["total"] += r["value"] or 0
+        slot["tickers"].append((r["symbol"], r["value"] or 0))
 
+    # 2. Per-ETF price history + top holdings (slow yfinance calls).
     results = []
-    for symbol, name, emoji in SECTORS:
+    for symbol, name, emoji, blurb, gics in _SECTOR_ETFS:
         try:
-            hist = yf.Ticker(symbol).history(period="6mo")
+            t = yf.Ticker(symbol)
+            hist = t.history(period="1y")
             if len(hist) < 2:
                 continue
-            latest = float(hist["Close"].iloc[-1])
-            # Various lookbacks
+            latest_px = float(hist["Close"].iloc[-1])
+
             def pct(days: int) -> float | None:
                 if len(hist) < days + 1:
                     return None
                 past = float(hist["Close"].iloc[-1 - days])
-                return (latest - past) / past * 100 if past else None
-            d1 = pct(1)
-            d5 = pct(5)
-            d30 = pct(22)  # ~30 calendar = ~22 trading
-            d90 = pct(66)
+                return (latest_px - past) / past * 100 if past else None
+
+            # YTD = first trading day of this calendar year
+            ytd = None
+            year_mask = hist.index.year == hist.index[-1].year
+            if year_mask.any():
+                first = float(hist["Close"][year_mask].iloc[0])
+                ytd = (latest_px - first) / first * 100 if first else None
+            # 1-year = first row in the 1y history
+            first_1y = float(hist["Close"].iloc[0])
+            d365 = (latest_px - first_1y) / first_1y * 100 if first_1y else None
+
+            top_holdings: list[tuple[str, float]] = []
+            try:
+                fd = t.funds_data
+                th = fd.top_holdings
+                # Index is the symbol, "Holding Percent" column has the weight 0..1
+                for sym in th.index[:3]:
+                    weight = float(th.loc[sym, "Holding Percent"])
+                    top_holdings.append((str(sym), weight * 100))
+            except Exception:
+                pass
+
+            exposure = sector_exposure.get(gics, {"total": 0.0, "tickers": []}) if gics else None
             results.append({
-                "symbol": symbol, "name": name, "emoji": emoji,
-                "latest": latest, "d1": d1, "d5": d5, "d30": d30, "d90": d90,
+                "symbol": symbol, "name": name, "emoji": emoji, "blurb": blurb,
+                "gics": gics, "latest": latest_px,
+                "d1": pct(1), "d5": pct(5), "d30": pct(22), "d90": pct(66),
+                "ytd": ytd, "d365": d365,
+                "top_holdings": top_holdings,
+                "exposure_total": exposure["total"] if exposure else None,
+                "exposure_pct": (exposure["total"] / grand_total * 100) if exposure and grand_total else None,
+                "exposure_n": len(exposure["tickers"]) if exposure else 0,
             })
         except Exception:
             continue
@@ -1290,6 +1343,8 @@ def sectors_view():
             "cls_d5": cls(r["d5"]), "fmt_d5": fmt(r["d5"]),
             "cls_d30": cls(r["d30"]), "fmt_d30": fmt(r["d30"]),
             "cls_d90": cls(r["d90"]), "fmt_d90": fmt(r["d90"]),
+            "cls_ytd": cls(r["ytd"]), "fmt_ytd": fmt(r["ytd"]),
+            "cls_d365": cls(r["d365"]), "fmt_d365": fmt(r["d365"]),
             "cls_rel30": cls(rel30), "fmt_rel30": fmt(rel30),
             "cls_rel90": cls(rel90), "fmt_rel90": fmt(rel90),
         })
