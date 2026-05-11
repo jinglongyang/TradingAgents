@@ -1,0 +1,62 @@
+{# Ticker view: flat alphabetical list grouped by symbol, each expandable to show per-account breakdown. #}
+{% if not tickers %}
+  <p style="color:var(--fg-muted);">DB 暂时为空 — 点 "添加持仓" 开始</p>
+{% else %}
+  <table>
+    <thead>
+      <tr>
+        <th>Ticker</th>
+        <th class="num">合计股数</th>
+        <th class="num">当前价</th>
+        <th class="num">总价值</th>
+        <th class="num">总成本</th>
+        <th class="num">P/L%</th>
+        <th class="num">账户数</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for t in tickers %}
+      <tr>
+        <td>
+          <strong><a href="/lookup?q={{ t.symbol }}">{{ t.symbol }}</a></strong>
+        </td>
+        <td class="num">{{ "%.3f"|format(t.total_quantity) }}</td>
+        <td class="num">${{ "%.2f"|format(t.price) }}</td>
+        <td class="num">${{ "{:,.0f}".format(t.total_value) }}</td>
+        <td class="num">${{ "{:,.0f}".format(t.total_cost) }}</td>
+        <td class="num {{ t.pl_class }}">{{ "%+.1f"|format(t.pl_pct) }}%</td>
+        <td class="num">{{ t.n_accounts }}</td>
+        <td>
+          <details>
+            <summary style="cursor:pointer;font-size:11px;color:var(--accent);">展开账户 ↓</summary>
+            <table style="margin-top:8px;width:100%;background:var(--bg);border-radius:6px;">
+              <thead><tr>
+                <th style="font-size:10px;">账户</th>
+                <th style="font-size:10px;">类型</th>
+                <th class="num" style="font-size:10px;">股数</th>
+                <th class="num" style="font-size:10px;">价值</th>
+                <th class="num" style="font-size:10px;">P/L%</th>
+              </tr></thead>
+              <tbody>
+                {% for a in t.accounts %}
+                <tr>
+                  <td style="font-size:12px;">
+                    {{ a.account_name }}
+                    <span style="color:var(--fg-muted);font-size:10px;">· 🏦 {{ a.broker }} · 👤 {{ a.owner }}</span>
+                  </td>
+                  <td><span class="tag tag-{{ a.account_type_lower }}">{{ a.account_type }}</span></td>
+                  <td class="num">{{ "%.3f"|format(a.quantity) }}</td>
+                  <td class="num">${{ "{:,.0f}".format(a.current_value) }}</td>
+                  <td class="num {{ a.pl_class }}">{{ "%+.1f"|format(a.pl_pct) }}%</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </details>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endif %}

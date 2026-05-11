@@ -198,12 +198,8 @@ function openEdit(snapshotId, sym, qty, price, cost, broker) {
 """
 
 
-def _build_holdings_view():
-    """Return (accounts, n_rows, total_value).
-
-    `accounts` is a list of dicts ready for `_holdings.html` to render. All
-    HTML/formatting decisions are made in the template, not here.
-    """
+def _load_holdings_rows() -> list[dict]:
+    """Single source for the latest snapshot — used by both views."""
     today = date.today().isoformat()
     latest = latest_snapshot_date()
     with connect() as conn:
@@ -215,20 +211,74 @@ def _build_holdings_view():
             FROM positions_snapshot p
             LEFT JOIN tickers t ON t.symbol = p.symbol
             WHERE p.import_date = ?
-            ORDER BY p.account_name, p.symbol
+            ORDER BY p.symbol, p.account_name
             """,
             (latest,) if latest else (today,),
         ).fetchall()
-
-    if not rows:
-        return [], 0, 0.0
-
-    rows = [
+    return [
         {**dict(r),
          "last_price": r["authoritative_price"] or 0,
          "current_value": r["authoritative_value"] or 0}
         for r in rows
     ]
+
+
+def _build_tickers_view():
+    """Return (tickers, n_rows, total_value) — flat list grouped by symbol,
+    each entry has aggregated totals plus the per-account breakdown."""
+    rows = _load_holdings_rows()
+    if not rows:
+        return [], 0, 0.0
+    by_sym: dict[str, list] = {}
+    for r in rows:
+        by_sym.setdefault(r["symbol"], []).append(r)
+    tickers: list[dict] = []
+    total = 0.0
+    for sym, items in sorted(by_sym.items()):  # alphabetical
+        sub_value = sum(r["current_value"] for r in items)
+        sub_cost = sum(r["cost_basis_total"] or 0 for r in items)
+        sub_qty = sum(r["quantity"] for r in items)
+        total += sub_value
+        pl_pct = ((sub_value - sub_cost) / sub_cost * 100) if sub_cost else 0.0
+        # Use the first row's price (they should all be equal — pulled from tickers table)
+        price = items[0]["last_price"]
+        accounts = []
+        for r in sorted(items, key=lambda x: -x["current_value"]):
+            cost = r["cost_basis_total"] or 0
+            apl = (r["current_value"] - cost) / cost * 100 if cost else 0
+            accounts.append({
+                "snapshot_id": r["snapshot_id"],
+                "account_id": r["account_id"],
+                "account_name": r["account_name"],
+                "account_type": r["account_type"],
+                "account_type_lower": (r["account_type"] or "").lower(),
+                "broker": r["broker"] or "—",
+                "owner": r["owner"] or "—",
+                "quantity": r["quantity"],
+                "current_value": r["current_value"],
+                "cost": cost,
+                "pl_pct": apl,
+                "pl_class": "gain" if apl >= 0 else "loss",
+            })
+        tickers.append({
+            "symbol": sym,
+            "price": price,
+            "total_value": sub_value,
+            "total_cost": sub_cost,
+            "total_quantity": sub_qty,
+            "pl_pct": pl_pct,
+            "pl_class": "gain" if pl_pct >= 0 else "loss",
+            "n_accounts": len(items),
+            "accounts": accounts,
+        })
+    return tickers, len(rows), total
+
+
+def _build_holdings_view():
+    """Return (accounts, n_rows, total_value) for the by-account view."""
+    rows = _load_holdings_rows()
+    if not rows:
+        return [], 0, 0.0
 
     by_account: dict[tuple[str, str], list] = {}
     for r in rows:
@@ -295,15 +345,23 @@ def _ticker_pool() -> list[dict[str, str]]:
     return out
 
 
-def _render(message: str = "", level: str = "success"):
+def _render(message: str = "", level: str = "success", view: str = "account"):
     """Render the main holdings page via Jinja2.
 
+    `view` is "account" (default — grouped by account, sorted by value) or
+    "ticker" (flat list grouped by symbol, alphabetical).
     `message` is plain text (may contain inline HTML if needed, gets ``|safe``
     in the template); `level` is one of success / error / info / warning.
     Empty `message` means no flash banner.
     """
     import json as _json
-    accounts, n_rows, total_val = _build_holdings_view()
+    if view == "ticker":
+        tickers, n_rows, total_val = _build_tickers_view()
+        accounts = []
+    else:
+        view = "account"
+        accounts, n_rows, total_val = _build_holdings_view()
+        tickers = []
     ticker_pool = _ticker_pool()
     flash = {"text": message, "level": level} if message else None
     return templates.TemplateResponse(
@@ -312,7 +370,9 @@ def _render(message: str = "", level: str = "success"):
         {
             "css": CSS,
             "extra_js": JS,
+            "view": view,
             "accounts": accounts,
+            "tickers": tickers,
             "n_rows": n_rows,
             "total_val": total_val,
             "latest": latest_snapshot_date() or "(none)",
@@ -327,9 +387,9 @@ def _render(message: str = "", level: str = "success"):
 
 
 @app.get("/", response_class=HTMLResponse)
-def index(msg: str = ""):
+def index(msg: str = "", view: str = "account"):
     init_db()
-    return _render(message=msg or "")
+    return _render(message=msg or "", view=view)
 
 
 @app.post("/add")
@@ -1688,27 +1748,45 @@ def _find_inflight_run(want_meta: dict[str, str]) -> str | None:
     return None
 
 
-def _cached_decisions(tickers: list[str], freshness_min: int = _CACHE_FRESHNESS_MIN) -> dict[str, str]:
+def _cached_decisions(tickers: list[str], instruction: str = "",
+                      freshness_min: int = _CACHE_FRESHNESS_MIN) -> dict[str, str]:
     """Return {symbol: trade_date} for tickers with a decision created within
-    the freshness window. Used to skip a re-run when nothing has changed.
+    the freshness window AND with a matching instruction. Used to skip a
+    re-run when nothing has changed.
 
     decisions.created_at is stored as UTC (sqlite ``datetime('now')`` default),
     so we compare against UTC — never use ``localtime`` here, that's a 7-8h bug.
+
+    Instruction match: empty input matches NULL/empty stored instructions;
+    non-empty must match exactly. A run with a different instruction is a
+    different question and should not be cache-hit.
     """
     if not tickers:
         return {}
+    norm_instruction = (instruction or "").strip()
     with connect() as conn:
         placeholders = ",".join("?" * len(tickers))
-        rows = conn.execute(
-            f"""
-            SELECT symbol, MAX(created_at) AS latest_at, trade_date
-              FROM decisions
-             WHERE symbol IN ({placeholders})
-               AND created_at >= datetime('now', ?)
-             GROUP BY symbol
-            """,
-            (*tickers, f"-{freshness_min} minutes"),
-        ).fetchall()
+        if norm_instruction:
+            sql = f"""
+                SELECT symbol, MAX(created_at) AS latest_at, trade_date
+                  FROM decisions
+                 WHERE symbol IN ({placeholders})
+                   AND created_at >= datetime('now', ?)
+                   AND COALESCE(instruction, '') = ?
+                 GROUP BY symbol
+            """
+            params = (*tickers, f"-{freshness_min} minutes", norm_instruction)
+        else:
+            sql = f"""
+                SELECT symbol, MAX(created_at) AS latest_at, trade_date
+                  FROM decisions
+                 WHERE symbol IN ({placeholders})
+                   AND created_at >= datetime('now', ?)
+                   AND COALESCE(instruction, '') = ''
+                 GROUP BY symbol
+            """
+            params = (*tickers, f"-{freshness_min} minutes")
+        rows = conn.execute(sql, params).fetchall()
     return {r["symbol"]: r["trade_date"] for r in rows}
 
 
@@ -1826,8 +1904,9 @@ def run_analysis(
                 level="success",
             )
 
-        # 2. Cache: all tickers have a decision created within freshness window?
-        cached = _cached_decisions(ticker_list)
+        # 2. Cache: all tickers have a decision created within freshness window
+        # AND with a matching instruction?
+        cached = _cached_decisions(ticker_list, instruction=instruction)
         if cached and all(t in cached for t in ticker_list):
             links = " · ".join(f'<a href="/decisions/{t}">{t}</a>' for t in ticker_list)
             return _render(

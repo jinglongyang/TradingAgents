@@ -226,7 +226,7 @@ def main() -> int:
         "import-manual",
         help="Import a manually-edited positions CSV (Robinhood / Schwab / etc.).",
     )
-    p.add_argument("csv", nargs="+", help="Path(s) to manual CSV. See templates/manual_positions.csv")
+    p.add_argument("csv", nargs="+", help="Path(s) to manual CSV. See samples/manual_positions.csv for the expected columns")
     p.add_argument("--date", help="YYYY-MM-DD; defaults to today")
     p.set_defaults(func=cmd_import_manual)
 

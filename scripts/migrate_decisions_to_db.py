@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -99,17 +100,22 @@ def main() -> int:
                 print(f"  [dry-run] {ticker} {trade_date} {rating} ({len(actions)} actions) — src {jf.parent.parent.name}")
                 continue
 
+            # instruction may have been injected via USER_TAX_CONTEXT for this
+            # run; store it so the cache check can distinguish runs that asked
+            # different things.
+            instruction = os.environ.get("USER_TAX_CONTEXT", "").strip() or None
             cur = conn.execute(
                 """
-                INSERT INTO decisions (trade_date, symbol, rating, final_decision, account_actions)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO decisions (trade_date, symbol, rating, final_decision, account_actions, instruction)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(trade_date, symbol) DO UPDATE SET
                     rating = excluded.rating,
                     final_decision = excluded.final_decision,
                     account_actions = excluded.account_actions,
+                    instruction = excluded.instruction,
                     created_at = datetime('now')
                 """,
-                (trade_date, ticker, rating, final_md, json.dumps(actions) if actions else None),
+                (trade_date, ticker, rating, final_md, json.dumps(actions) if actions else None, instruction),
             )
             if cur.rowcount == 1:
                 inserted += 1

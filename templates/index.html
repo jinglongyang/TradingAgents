@@ -49,7 +49,20 @@
     <a class="btn secondary" href="/api/positions" target="_blank">View JSON</a>
   </div>
 
-  {% include "partials/holdings.html" %}
+  <div style="display:flex;gap:4px;margin-bottom:12px;font-size:13px;">
+    <a href="/?view=account"
+       class="btn small {{ 'secondary' if view == 'ticker' else '' }}"
+       style="text-decoration:none;">按账户分组</a>
+    <a href="/?view=ticker"
+       class="btn small {{ 'secondary' if view == 'account' else '' }}"
+       style="text-decoration:none;">按 Ticker 字母排序</a>
+  </div>
+
+  {% if view == "ticker" %}
+    {% include "partials/holdings_by_ticker.html" %}
+  {% else %}
+    {% include "partials/holdings.html" %}
+  {% endif %}
 
   {# ---------- Add Modal ---------- #}
   <div class="modal-backdrop" id="add-modal">

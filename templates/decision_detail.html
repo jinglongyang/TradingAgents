@@ -17,9 +17,19 @@
   </h1>
   <p class="rating-tagline">{{ rating_tagline }}</p>
   <p class="subtitle">分析日期: {{ trade_date }} · 录入时间: {{ created_at }}</p>
-  <div style="margin-bottom:16px;">
+  <div style="margin-bottom:16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
     <a class="btn secondary" href="/decisions">← 回到所有评级</a>
     <a class="btn secondary" href="/">← 持仓页</a>
+
+    <form method="post" action="/run" style="display:inline-flex;gap:6px;align-items:center;margin-left:auto;"
+          onsubmit="return confirm('重新分析 {{ ticker }}？这会启动一个新的 PM 分析任务（~2 分钟）。')">
+      <input type="hidden" name="mode" value="tickers">
+      <input type="hidden" name="tickers" value="{{ ticker }}">
+      <input type="hidden" name="force" value="1">
+      <input name="instruction" placeholder="可选指令（如：避免 $5K+ 资本利得）"
+             style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:12px;width:220px;">
+      <button type="submit" class="success small">🔁 重新分析</button>
+    </form>
   </div>
 
   {% include "partials/rating_glossary.html" %}

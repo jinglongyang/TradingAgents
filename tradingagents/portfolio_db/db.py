@@ -170,4 +170,10 @@ def init_db(db_path: Path | None = None) -> Path:
                     (owner, pattern),
                 )
             conn.execute("UPDATE positions_snapshot SET owner = 'Self' WHERE owner IS NULL")
+
+        # Migration: instruction column on decisions for proper cache-by-instruction
+        decision_cols = {row["name"] for row in conn.execute("PRAGMA table_info(decisions)").fetchall()}
+        if "instruction" not in decision_cols:
+            conn.execute("ALTER TABLE decisions ADD COLUMN instruction TEXT")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_decisions_instruction ON decisions (symbol, instruction)")
     return path
