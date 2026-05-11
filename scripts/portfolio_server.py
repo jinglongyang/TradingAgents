@@ -120,6 +120,16 @@ function openAccountEdit(acctId, acctName, currentBroker, currentType, currentOw
     document.getElementById('acct-delete-id').value = acctId;
     openModal('acct-edit-modal');
 }
+function openAddToAccount(acctId, acctName, broker, accType, owner) {
+    // Open the add-modal pre-filled with this account's metadata
+    document.querySelector('#add-modal input[name="account_id"]').value = acctId;
+    document.querySelector('#add-modal input[name="account_name"]').value = acctName;
+    document.querySelector('#add-modal input[name="owner"]').value = owner || 'Self';
+    document.querySelector('#add-modal select[name="account_type"]').value = accType || 'Taxable';
+    document.querySelector('#add-modal select[name="broker"]').value = broker || 'Fidelity';
+    document.querySelector('#add-modal input[name="symbol"]').focus();
+    openModal('add-modal');
+}
 function openEdit(snapshotId, sym, qty, price, cost, broker) {
     document.getElementById('edit-snapshot-id').value = snapshotId;
     document.getElementById('edit-symbol').value = sym;
@@ -174,7 +184,11 @@ def _build_holdings_view():
       <span class="tag" style="margin-left:4px;font-size:10px;background:var(--bg);border:1px solid var(--border);">🏦 {broker}</span>
       <span class="tag" style="margin-left:4px;font-size:10px;background:var(--bg);border:1px solid var(--border);">👤 {owner}</span>
     </div>
-    <div class="account-meta">{len(items)} 仓位 · ${sub:,.0f}</div>
+    <div class="account-meta">
+      {len(items)} 仓位 · ${sub:,.0f}
+      <button class="small success" style="margin-left:8px;padding:3px 10px;font-size:11px;"
+              onclick="openAddToAccount('{aid}', `{aname}`, '{broker}', '{atype}', '{owner}')">➕ 加 ticker</button>
+    </div>
   </div>
   <table>
     <thead><tr><th>Ticker</th><th class="num">持股</th><th class="num">价格</th><th class="num">价值</th><th class="num">成本</th><th class="num">P/L%</th><th></th></tr></thead>
