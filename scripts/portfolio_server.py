@@ -1689,16 +1689,31 @@ _ACTION_BUCKETS = {
     "Reduce": "reduce", "Sell": "reduce", "Trim": "reduce",
     "Add": "add", "Buy": "add", "Initiate": "add", "Open": "add",
 }
+_RATING_WEIGHT = {"Buy": 3, "Overweight": 2, "Hold": 1, "Underweight": 0, "Sell": -1}
+_TAX_WEIGHT = {"TaxDeferred": 3, "Roth": 3, "ChildEdu": 2, "Taxable": 1, "Unknown": 1}
+
+
+def _priority_score(item: dict) -> float:
+    """Higher = do first. Composite of rating strength, account tax efficiency,
+    and dollar magnitude (log so a $50 token-buy doesn't dominate a $5000 buy
+    by orders of magnitude). Reduce items use the same formula but get sorted
+    by raw est_value separately."""
+    import math
+    rating = _RATING_WEIGHT.get(item.get("rating"), 1)
+    tax = _TAX_WEIGHT.get(item.get("account_type"), 1)
+    value = max(item.get("est_value") or 0, 0)
+    return rating * 1000 + tax * 100 + math.log10(value + 1) * 10
 
 
 @app.get("/today", response_class=HTMLResponse)
 def today_view():
-    """Consolidated action list for the latest decision date.
+    """Consolidated execution list grouped by account.
 
-    Groups every per-account action across all tickers into Reduce / Add /
-    Hold buckets so the user can execute trades top-down without clicking
-    into each ticker. Reduces float to the top — finish derisking before
-    deploying capital.
+    Each account card shows cash freed by reduces vs cash needed for adds,
+    so the user can see at a glance whether a given account can fund its
+    own buys from same-account sells (cash doesn't move across accounts).
+    Adds within an account are sorted by a composite priority score so the
+    most important ones come first when cash is tight.
     """
     import json as _json
     with connect() as conn:
@@ -1714,32 +1729,42 @@ def today_view():
             (r["account_id"], r["symbol"]): dict(r)
             for r in conn.execute(
                 """
-                SELECT account_id, account_name, symbol, quantity, last_price, current_value
+                SELECT account_id, account_name, account_type, symbol,
+                       quantity, last_price, current_value
                 FROM positions_snapshot
                 WHERE import_date = (SELECT MAX(import_date) FROM positions_snapshot)
                 """
             ).fetchall()
         }
 
-    name_to_account = {}
-    for (_aid, _sym), row in snapshot.items():
-        name_to_account.setdefault(row["account_name"], row["account_id"])
+    # account_name → first observed account_id (decisions only carry the name)
+    name_to_account: dict[str, str] = {}
+    account_meta: dict[str, dict] = {}
+    for (aid, _sym), row in snapshot.items():
+        name_to_account.setdefault(row["account_name"], aid)
+        account_meta.setdefault(aid, {
+            "account_id": aid,
+            "account_name": row["account_name"],
+            "account_type": row["account_type"],
+        })
 
-    reduces, adds, holds = [], [], []
+    items: list[dict] = []
     for d in decisions:
         actions = _json.loads(d["account_actions"]) if d["account_actions"] else []
         for a in actions:
             account_name = a.get("account_name", "")
-            account_id = name_to_account.get(account_name)
+            account_id = name_to_account.get(account_name) or f"name:{account_name}"
             pos = snapshot.get((account_id, d["symbol"])) if account_id else None
             qty = pos["quantity"] if pos else None
             price = pos["last_price"] if pos else None
             size_pct = a.get("size_pct")
             est_shares = (qty * size_pct / 100.0) if (qty and size_pct) else None
+            est_value = (est_shares * price) if (est_shares and price) else None
 
-            item = {
+            items.append({
                 "ticker": d["symbol"],
                 "rating": d["rating"],
+                "account_id": account_id,
                 "account_name": account_name,
                 "account_type": a.get("account_type", ""),
                 "action": a.get("action", ""),
@@ -1747,28 +1772,62 @@ def today_view():
                 "current_qty": qty,
                 "current_price": price,
                 "est_shares": est_shares,
-                "est_value": (est_shares * price) if (est_shares and price) else None,
+                "est_value": est_value,
                 "rationale": a.get("rationale", ""),
-            }
-            bucket = _ACTION_BUCKETS.get(item["action"])
-            if bucket == "reduce":
-                reduces.append(item)
-            elif bucket == "add":
-                adds.append(item)
-            else:
-                holds.append(item)
+                "bucket": _ACTION_BUCKETS.get(a.get("action", ""), "hold"),
+            })
 
-    reduces.sort(key=lambda x: -(x["est_value"] or 0))
-    adds.sort(key=lambda x: -(x["size_pct"] or 0))
+    # Group by account
+    by_account: dict[str, dict] = {}
+    for it in items:
+        aid = it["account_id"]
+        if aid not in by_account:
+            meta = account_meta.get(aid, {})
+            by_account[aid] = {
+                "account_id": aid,
+                "account_name": it["account_name"] or meta.get("account_name", aid),
+                "account_type": it["account_type"] or meta.get("account_type", ""),
+                "reduces": [],
+                "adds": [],
+                "holds": [],
+            }
+        by_account[aid][it["bucket"] + "s"].append(it)
+
+    # Per-account: sort reduces by $ desc (biggest derisk first), adds by
+    # priority score desc (most important first when cash runs out).
+    accounts = []
+    for acct in by_account.values():
+        acct["reduces"].sort(key=lambda x: -(x["est_value"] or 0))
+        acct["adds"].sort(key=lambda x: -_priority_score(x))
+        acct["cash_in"] = sum((x["est_value"] or 0) for x in acct["reduces"])
+        acct["cash_out"] = sum((x["est_value"] or 0) for x in acct["adds"])
+        acct["net"] = acct["cash_in"] - acct["cash_out"]
+        acct["has_action"] = bool(acct["reduces"] or acct["adds"])
+        accounts.append(acct)
+
+    # Account order: those with actions first, sorted by total $ activity desc;
+    # hold-only accounts last so the page leads with what needs doing.
+    accounts.sort(key=lambda a: (
+        not a["has_action"],
+        -(a["cash_in"] + a["cash_out"]),
+    ))
+
+    totals = {
+        "cash_in": sum(a["cash_in"] for a in accounts),
+        "cash_out": sum(a["cash_out"] for a in accounts),
+        "n_reduces": sum(len(a["reduces"]) for a in accounts),
+        "n_adds": sum(len(a["adds"]) for a in accounts),
+        "n_holds": sum(len(a["holds"]) for a in accounts),
+    }
+    totals["net"] = totals["cash_in"] - totals["cash_out"]
 
     return templates.TemplateResponse(
         _dummy_request(), "today.html",
         {
             "css": CSS,
             "trade_date": trade_date,
-            "reduces": reduces,
-            "adds": adds,
-            "holds": holds,
+            "accounts": accounts,
+            "totals": totals,
             "n_tickers": len({d["symbol"] for d in decisions}),
         },
     )

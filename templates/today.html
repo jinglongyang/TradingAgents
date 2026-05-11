@@ -6,13 +6,38 @@
   <p class="subtitle">
     {% if trade_date %}
       决策日期 <strong>{{ trade_date }}</strong> · {{ n_tickers }} 个 ticker ·
-      <span style="color:var(--loss);">{{ reduces|length }} 项减仓</span> ·
-      <span style="color:var(--gain);">{{ adds|length }} 项加仓</span> ·
-      {{ holds|length }} 项持有
+      {{ accounts|length }} 个账户 ·
+      <span style="color:var(--loss);">{{ totals.n_reduces }} 减仓</span> /
+      <span style="color:var(--gain);">{{ totals.n_adds }} 加仓</span> /
+      {{ totals.n_holds }} 持有
     {% else %}
       暂无决策记录 — 先跑一次 analyze_holdings。
     {% endif %}
   </p>
+
+  {% if trade_date %}
+  <div class="status" style="background:var(--bg-subtle);padding:14px;border-radius:8px;border:1px solid var(--border);margin-bottom:16px;">
+    <div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap;">
+      <div>
+        <div style="font-size:11px;color:var(--fg-muted);">📥 减仓释放现金</div>
+        <div style="font-size:18px;font-weight:600;color:var(--loss);">${{ "{:,.0f}".format(totals.cash_in) }}</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--fg-muted);">📤 加仓需要现金</div>
+        <div style="font-size:18px;font-weight:600;color:var(--gain);">${{ "{:,.0f}".format(totals.cash_out) }}</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--fg-muted);">总缺口（不算各账户原有现金）</div>
+        <div style="font-size:18px;font-weight:600;color:{% if totals.net >= 0 %}var(--gain){% else %}var(--loss){% endif %};">
+          {% if totals.net >= 0 %}+${{ "{:,.0f}".format(totals.net) }}{% else %}-${{ "{:,.0f}".format(-totals.net) }}{% endif %}
+        </div>
+      </div>
+      <div style="font-size:12px;color:var(--fg-muted);max-width:380px;">
+        ⚠️ 现金不跨账户。各账户加仓只能用同账户现金 / 卖出释放的现金。下面按账户分组。
+      </div>
+    </div>
+  </div>
+  {% endif %}
 
   <div style="margin-bottom:16px;">
     <a class="btn secondary" href="/">← 回到持仓</a>
@@ -20,61 +45,95 @@
     <a class="btn secondary" href="/executions">📒 交易记录</a>
   </div>
 
-  {% macro action_table(items, accent) %}
-    <table style="background:var(--bg-subtle);border-radius:8px;border:1px solid var(--border);overflow:hidden;width:100%;">
-      <thead>
-        <tr>
-          <th>Ticker</th>
-          <th>账户</th>
-          <th>类型</th>
-          <th>动作</th>
-          <th class="num">幅度</th>
-          <th class="num">估算股数</th>
-          <th class="num">估算金额</th>
-          <th>理由</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for i in items %}
-        <tr>
-          <td><a href="/decisions/{{ i.ticker }}" style="font-weight:600;color:{{ accent }};">{{ i.ticker }}</a>
-              <div style="font-size:11px;color:var(--fg-muted);"><span class="tag tag-{{ i.rating|lower }}" style="padding:2px 6px;font-size:10px;">{{ i.rating }}</span></div>
-          </td>
-          <td>{{ i.account_name }}</td>
-          <td><span style="color:var(--fg-muted);font-size:12px;">{{ i.account_type }}</span></td>
-          <td><strong style="color:{{ accent }};">{{ i.action }}</strong></td>
-          <td class="num">{% if i.size_pct is not none %}{{ "%.0f"|format(i.size_pct) }}%{% else %}—{% endif %}</td>
-          <td class="num">
-            {% if i.est_shares is not none %}
-              {{ "%.2f"|format(i.est_shares) }}
-              <div style="font-size:11px;color:var(--fg-muted);">/ {{ "%.2f"|format(i.current_qty) }}</div>
-            {% else %}—{% endif %}
-          </td>
-          <td class="num">{% if i.est_value is not none %}${{ "{:,.0f}".format(i.est_value) }}{% else %}—{% endif %}</td>
-          <td style="font-size:12px;color:var(--fg-muted);max-width:400px;">{{ i.rationale }}</td>
-        </tr>
+  {% for acct in accounts %}
+    {% if acct.has_action %}
+    <div style="background:var(--bg-subtle);padding:14px 16px;border-radius:8px;border:1px solid var(--border);margin-bottom:14px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
+        <div>
+          <span style="font-weight:600;font-size:15px;">{{ acct.account_name }}</span>
+          <span style="color:var(--fg-muted);font-size:12px;margin-left:8px;">[{{ acct.account_type }}]</span>
+        </div>
+        <div style="display:flex;gap:14px;font-size:13px;">
+          {% if acct.cash_in > 0 %}<span><span style="color:var(--fg-muted);">释放</span> <strong style="color:var(--loss);">+${{ "{:,.0f}".format(acct.cash_in) }}</strong></span>{% endif %}
+          {% if acct.cash_out > 0 %}<span><span style="color:var(--fg-muted);">需要</span> <strong style="color:var(--gain);">-${{ "{:,.0f}".format(acct.cash_out) }}</strong></span>{% endif %}
+          {% if acct.cash_in or acct.cash_out %}
+            <span><span style="color:var(--fg-muted);">净</span>
+              <strong style="color:{% if acct.net >= 0 %}var(--gain){% else %}var(--loss){% endif %};">
+                {% if acct.net >= 0 %}+${{ "{:,.0f}".format(acct.net) }}{% else %}-${{ "{:,.0f}".format(-acct.net) }}{% endif %}
+              </strong>
+              {% if acct.net < 0 %}<span style="color:var(--fg-muted);font-size:11px;">（需外部）</span>{% endif %}
+            </span>
+          {% endif %}
+        </div>
+      </div>
+
+      <table style="background:var(--bg);border-radius:6px;border:1px solid var(--border);overflow:hidden;width:100%;">
+        <thead>
+          <tr>
+            <th style="width:8%;">优先级</th>
+            <th>Ticker</th>
+            <th>动作</th>
+            <th class="num">幅度</th>
+            <th class="num">估算股数</th>
+            <th class="num">估算金额</th>
+            <th>理由</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for i in acct.reduces %}
+          <tr>
+            <td><span style="background:var(--loss);color:white;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600;">先减</span></td>
+            <td><a href="/decisions/{{ i.ticker }}" style="font-weight:600;color:var(--loss);">{{ i.ticker }}</a>
+                <span class="tag tag-{{ i.rating|lower }}" style="padding:1px 5px;font-size:10px;margin-left:4px;">{{ i.rating }}</span></td>
+            <td><strong style="color:var(--loss);">{{ i.action }}</strong></td>
+            <td class="num">{% if i.size_pct is not none %}{{ "%.0f"|format(i.size_pct) }}%{% else %}—{% endif %}</td>
+            <td class="num">
+              {% if i.est_shares is not none %}
+                {{ "%.2f"|format(i.est_shares) }}
+                <div style="font-size:10px;color:var(--fg-muted);">/ {{ "%.2f"|format(i.current_qty) }}</div>
+              {% else %}—{% endif %}
+            </td>
+            <td class="num">{% if i.est_value is not none %}${{ "{:,.0f}".format(i.est_value) }}{% else %}—{% endif %}</td>
+            <td style="font-size:12px;color:var(--fg-muted);max-width:380px;">{{ i.rationale }}</td>
+          </tr>
+          {% endfor %}
+          {% for i in acct.adds %}
+          <tr>
+            <td><span style="background:var(--gain);color:white;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600;">{{ loop.index }}</span></td>
+            <td><a href="/decisions/{{ i.ticker }}" style="font-weight:600;color:var(--gain);">{{ i.ticker }}</a>
+                <span class="tag tag-{{ i.rating|lower }}" style="padding:1px 5px;font-size:10px;margin-left:4px;">{{ i.rating }}</span></td>
+            <td><strong style="color:var(--gain);">{{ i.action }}</strong></td>
+            <td class="num">{% if i.size_pct is not none %}{{ "%.0f"|format(i.size_pct) }}%{% else %}—{% endif %}</td>
+            <td class="num">
+              {% if i.est_shares is not none %}
+                +{{ "%.2f"|format(i.est_shares) }}
+                {% if i.current_qty %}<div style="font-size:10px;color:var(--fg-muted);">/ {{ "%.2f"|format(i.current_qty) }}</div>{% endif %}
+              {% else %}—{% endif %}
+            </td>
+            <td class="num">{% if i.est_value is not none %}${{ "{:,.0f}".format(i.est_value) }}{% else %}—{% endif %}</td>
+            <td style="font-size:12px;color:var(--fg-muted);max-width:380px;">{{ i.rationale }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  {% endfor %}
+
+  {# Hold-only accounts collapsed at bottom #}
+  {% set hold_only = accounts | rejectattr('has_action') | list %}
+  {% if hold_only %}
+    <details style="margin-top:20px;">
+      <summary style="cursor:pointer;font-weight:600;color:var(--fg-muted);">
+        💤 仅 Hold 的账户 ({{ hold_only|length }}) — 点击展开
+      </summary>
+      <div style="margin-top:8px;padding-left:12px;">
+        {% for acct in hold_only %}
+          <div style="margin-bottom:4px;font-size:13px;color:var(--fg-muted);">
+            {{ acct.account_name }} [{{ acct.account_type }}] — {{ acct.holds|length }} hold(s):
+            {% for h in acct.holds %}{{ h.ticker }}{% if not loop.last %}, {% endif %}{% endfor %}
+          </div>
         {% endfor %}
-      </tbody>
-    </table>
-  {% endmacro %}
-
-  {% if reduces %}
-    <h2 style="color:var(--loss);margin-top:24px;">🔻 减仓优先 ({{ reduces|length }})</h2>
-    <p style="color:var(--fg-muted);font-size:13px;margin-top:-8px;">按估算金额降序 — 先释放风险，再分配资金给加仓项。</p>
-    {{ action_table(reduces, 'var(--loss)') }}
-  {% endif %}
-
-  {% if adds %}
-    <h2 style="color:var(--gain);margin-top:24px;">🟢 加仓 ({{ adds|length }})</h2>
-    <p style="color:var(--fg-muted);font-size:13px;margin-top:-8px;">按加仓幅度降序。</p>
-    {{ action_table(adds, 'var(--gain)') }}
-  {% endif %}
-
-  {% if holds %}
-    <details style="margin-top:24px;">
-      <summary style="cursor:pointer;font-size:18px;font-weight:600;color:var(--fg-muted);">💤 持有 ({{ holds|length }}) — 点击展开</summary>
-      <div style="margin-top:12px;">
-        {{ action_table(holds, 'var(--fg-muted)') }}
       </div>
     </details>
   {% endif %}
