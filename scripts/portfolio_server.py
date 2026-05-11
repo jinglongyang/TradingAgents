@@ -110,6 +110,14 @@ function openSell(sym, acctId, acctName, qty) {
     document.getElementById('sell-title').textContent = `Sell ${sym} from ${acctName}`;
     openModal('sell-modal');
 }
+function openAccountEdit(acctId, acctName, currentBroker, currentType) {
+    document.getElementById('acct-edit-id').value = acctId;
+    document.getElementById('acct-edit-name-input').value = acctName;
+    document.getElementById('acct-edit-broker-select').value = currentBroker || 'Fidelity';
+    document.getElementById('acct-edit-type-select').value = currentType || 'Taxable';
+    document.getElementById('acct-edit-title').textContent = `编辑账户: ${acctName}`;
+    openModal('acct-edit-modal');
+}
 function openEdit(snapshotId, sym, qty, price, cost, broker) {
     document.getElementById('edit-snapshot-id').value = snapshotId;
     document.getElementById('edit-symbol').value = sym;
@@ -158,7 +166,9 @@ def _build_holdings_view():
     <div>
       <span class="account-name">{aname}</span>
       <span class="tag tag-{atype.lower()}">{atype}</span>
-      <span class="tag" style="margin-left:4px;font-size:10px;background:var(--bg);border:1px solid var(--border);">🏦 {broker}</span>
+      <span class="tag" style="margin-left:4px;font-size:10px;background:var(--bg);border:1px solid var(--border);cursor:pointer;"
+            onclick="openAccountEdit('{aid}', `{aname}`, '{broker}', '{atype}')"
+            title="点击修改本账户所有持仓的名字、broker、类型">🏦 {broker} ✎</span>
     </div>
     <div class="account-meta">{len(items)} 仓位 · ${sub:,.0f}</div>
   </div>
@@ -291,6 +301,51 @@ def _render(message: str = ""):
   </div>
 </div>
 
+<!-- Account-level Edit Modal -->
+<div class="modal-backdrop" id="acct-edit-modal">
+  <div class="modal">
+    <h3 id="acct-edit-title">编辑账户</h3>
+    <p style="color:var(--fg-muted);font-size:13px;">修改会应用到本账户的所有持仓行（按 account_id 匹配）</p>
+    <form method="post" action="/account-edit">
+      <input type="hidden" id="acct-edit-id" name="account_id">
+      <div class="field">
+        <label>账户名 <span class="hint">如 "Merrill CMA" / "Robinhood 个人户"</span></label>
+        <input id="acct-edit-name-input" name="account_name" required>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>账户类型</label>
+          <select id="acct-edit-type-select" name="account_type">
+            <option value="Taxable">Taxable — 应税</option>
+            <option value="Roth">Roth</option>
+            <option value="TaxDeferred">TaxDeferred — 401k/IRA</option>
+            <option value="ChildEdu">ChildEdu — 529</option>
+            <option value="Unknown">Unknown</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Broker / 平台</label>
+          <select id="acct-edit-broker-select" name="broker">
+            <option value="Fidelity">Fidelity</option>
+            <option value="Robinhood">Robinhood</option>
+            <option value="Schwab">Schwab</option>
+            <option value="E-Trade">E-Trade</option>
+            <option value="Vanguard">Vanguard</option>
+            <option value="Interactive Brokers">Interactive Brokers</option>
+            <option value="Merrill Lynch">Merrill Lynch</option>
+            <option value="TD Ameritrade">TD Ameritrade</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+        <button type="button" class="secondary" onclick="closeModal('acct-edit-modal')">取消</button>
+        <button type="submit">应用到所有行</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <!-- Edit Modal -->
 <div class="modal-backdrop" id="edit-modal">
   <div class="modal">
@@ -355,6 +410,34 @@ def add(
             broker=broker,
         )
         msg = f'<div class="msg success">✓ 已添加 <strong>{symbol.upper()}</strong> 到 {account_name}</div>'
+    except Exception as e:  # noqa: BLE001
+        msg = f'<div class="msg error">✗ 错误: {e}</div>'
+    return _render(message=msg)
+
+
+@app.post("/account-edit", response_class=HTMLResponse)
+def account_edit(
+    account_id: str = Form(...),
+    account_name: str = Form(...),
+    account_type: str = Form(...),
+    broker: str = Form(...),
+):
+    """Update account_name, account_type, and broker on every row of this account."""
+    try:
+        with connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE positions_snapshot
+                SET account_name = ?, account_type = ?, broker = ?
+                WHERE account_id = ?
+                """,
+                (account_name.strip(), account_type, broker, account_id),
+            )
+            n = cur.rowcount
+        msg = (
+            f'<div class="msg success">✓ 已更新 <strong>{n}</strong> 行 '
+            f'(name=<strong>{account_name}</strong>, type={account_type}, broker={broker})</div>'
+        )
     except Exception as e:  # noqa: BLE001
         msg = f'<div class="msg error">✗ 错误: {e}</div>'
     return _render(message=msg)
