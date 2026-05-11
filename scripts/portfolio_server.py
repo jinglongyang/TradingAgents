@@ -72,7 +72,7 @@ button:hover, .btn:hover { opacity: 0.9; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
 th { color: var(--fg-muted); font-weight: 500; font-size: 11px; text-transform: uppercase; }
-td.num { text-align: right; font-variant-numeric: tabular-nums; }
+th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.actions { text-align: right; white-space: nowrap; }
 td.actions button { margin-left: 6px; }
 .tag { display: inline-block; font-size: 10px; padding: 1px 7px; border-radius: 10px; background: var(--border); }
@@ -224,6 +224,7 @@ def _render(message: str = ""):
 
   <div class="toolbar">
     <button onclick="openModal('add-modal')">➕ 添加新持仓</button>
+    <a class="btn secondary" href="/owners">👥 按 Owner 看</a>
     <a class="btn secondary" href="/decisions">📋 PM 分析 & 评级</a>
     <a class="btn secondary" href="/executions">📒 交易记录</a>
     <a class="btn secondary" href="/api/positions" target="_blank">View JSON</a>
@@ -544,6 +545,89 @@ def sell(
     return _render(message=msg)
 
 
+@app.get("/owners", response_class=HTMLResponse)
+def owners_view():
+    """Group positions by owner (Self / Spouse / Joint / child names)."""
+    latest = latest_snapshot_date()
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM positions_snapshot WHERE import_date = ? ORDER BY current_value DESC",
+            (latest,) if latest else (date.today().isoformat(),),
+        ).fetchall()
+
+    by_owner: dict[str, list] = {}
+    for r in rows:
+        by_owner.setdefault(r["owner"] or "Unknown", []).append(r)
+
+    grand_total = sum(r["current_value"] for r in rows)
+
+    sections = []
+    sections.append(f'''
+<div class="status">
+  <strong>{len(rows)}</strong> 仓位 · <strong>{len(by_owner)}</strong> owners · 总价值 <strong>${grand_total:,.0f}</strong>
+</div>''')
+
+    # Summary table
+    sections.append('<h2 style="margin-top:24px;">📊 按 owner 汇总</h2>')
+    sections.append('<table><thead><tr><th>Owner</th><th class="num">仓位数</th><th class="num">价值</th><th class="num">占比</th><th class="num">按账户类型分布</th></tr></thead><tbody>')
+    for owner in sorted(by_owner, key=lambda o: -sum(r["current_value"] for r in by_owner[o])):
+        items = by_owner[owner]
+        sub = sum(r["current_value"] for r in items)
+        pct = sub / grand_total * 100 if grand_total else 0
+        type_breakdown: dict[str, float] = {}
+        for r in items:
+            type_breakdown[r["account_type"]] = type_breakdown.get(r["account_type"], 0) + r["current_value"]
+        tb = " · ".join(f'{t}: ${v/1000:.0f}K' for t, v in sorted(type_breakdown.items(), key=lambda x: -x[1]))
+        sections.append(
+            f'<tr><td><strong>👤 {owner}</strong></td>'
+            f'<td class="num">{len(items)}</td>'
+            f'<td class="num">${sub:,.0f}</td>'
+            f'<td class="num">{pct:.1f}%</td>'
+            f'<td style="font-size:12px;color:var(--fg-muted);">{tb}</td></tr>'
+        )
+    sections.append('</tbody></table>')
+
+    # Per-owner top holdings
+    for owner in sorted(by_owner, key=lambda o: -sum(r["current_value"] for r in by_owner[o])):
+        items = by_owner[owner]
+        sub = sum(r["current_value"] for r in items)
+        # Aggregate by symbol within owner
+        by_sym: dict[str, dict] = {}
+        for r in items:
+            s = by_sym.setdefault(r["symbol"], {"value": 0, "cost": 0, "shares": 0, "accounts": 0})
+            s["value"] += r["current_value"]
+            s["cost"] += r["cost_basis_total"] or 0
+            s["shares"] += r["quantity"]
+            s["accounts"] += 1
+        top = sorted(by_sym.items(), key=lambda kv: -kv[1]["value"])[:10]
+
+        sections.append(f'<h2 style="margin-top:32px;">👤 {owner} — top 10 ({len(by_sym)} unique tickers, ${sub:,.0f})</h2>')
+        sections.append('<table><thead><tr><th>Ticker</th><th class="num">合计股数</th><th class="num">价值</th><th class="num">成本</th><th class="num">P/L%</th><th class="num">账户数</th></tr></thead><tbody>')
+        for sym, d in top:
+            pl_pct = ((d["value"] - d["cost"]) / d["cost"] * 100) if d["cost"] else 0
+            pl_class = "gain" if pl_pct >= 0 else "loss"
+            sections.append(
+                f'<tr><td><strong>{sym}</strong></td>'
+                f'<td class="num">{d["shares"]:.3f}</td>'
+                f'<td class="num">${d["value"]:,.0f}</td>'
+                f'<td class="num">${d["cost"]:,.0f}</td>'
+                f'<td class="num {pl_class}">{pl_pct:+.1f}%</td>'
+                f'<td class="num">{d["accounts"]}</td></tr>'
+            )
+        sections.append('</tbody></table>')
+
+    body = f'''
+<h1>👥 按 Owner 看持仓</h1>
+<p class="subtitle">按 Self / Spouse / Joint / 子女 分组聚合</p>
+<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 回到持仓</a></div>
+{"".join(sections)}
+'''
+    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Owner 视图</title><style>{CSS}</style></head><body><div class="container">
+{body}
+</div></body></html>"""
+
+
 @app.get("/decisions", response_class=HTMLResponse)
 def decisions_view():
     import json as _json
@@ -563,8 +647,28 @@ def decisions_view():
         for r in ["Buy", "Overweight", "Hold", "Underweight", "Sell"] if counts.get(r, 0)
     )
 
+    glossary = """
+<details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-bottom:16px;border:1px solid var(--border);">
+<summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 评级说明（点击展开）</summary>
+<table style="margin-top:12px;font-size:13px;">
+<thead><tr><th>评级</th><th>中文</th><th>含义</th><th>典型动作</th></tr></thead>
+<tbody>
+<tr><td><span class="tag tag-buy" style="padding:2px 8px;">Buy</span></td><td>买入</td><td>强烈看多。基本面+趋势+估值全部支持</td><td>大幅加仓 / 新开仓</td></tr>
+<tr><td><span class="tag tag-overweight" style="padding:2px 8px;">Overweight</span></td><td><strong>超配</strong></td><td>看多但克制。该股<strong>组合权重应高于基准（如 SPY 指数）</strong>，但估值/技术不支持激进追价</td><td>持有 + 回调小幅加仓</td></tr>
+<tr><td><span class="tag tag-hold" style="padding:2px 8px;">Hold</span></td><td>持有</td><td>中性。基本面 OK 但当前不是好的进场点</td><td>已持不动，新资金等待</td></tr>
+<tr><td><span class="tag tag-underweight" style="padding:2px 8px;">Underweight</span></td><td><strong>低配</strong></td><td>看空但不清仓。该股<strong>组合权重应低于基准</strong>，建议部分减仓</td><td>分批减 20-35% / 反弹时卖</td></tr>
+<tr><td><span class="tag tag-sell" style="padding:2px 8px;">Sell</span></td><td>卖出</td><td>强烈看空。基本面恶化或重大风险</td><td>清仓 100%（应税账户做 TLH）</td></tr>
+</tbody>
+</table>
+<p style="margin-top:8px;font-size:12px;color:var(--fg-muted);">
+<strong>关键区分</strong>：Overweight ≠ Buy（强度不同）· Underweight ≠ Sell（保留部分 vs 全清）· "基准权重" 通常指 SPY 指数里该股的权重
+</p>
+</details>
+"""
+
     body = [f'<h1>📋 PM 分析 & 评级</h1><p class="subtitle">{len(rows)} 个 ticker · 最新分析按 ticker 自动汇总</p>',
             f'<div class="status">{chips}</div>',
+            glossary,
             '<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 回到持仓</a></div>',
             '<table style="background:var(--bg-subtle);border-radius:8px;border:1px solid var(--border);overflow:hidden;">',
             '<thead><tr><th>Ticker</th><th>评级</th><th>分析日期</th><th class="num">账户级动作</th><th>反思（如有）</th><th></th></tr></thead>',
