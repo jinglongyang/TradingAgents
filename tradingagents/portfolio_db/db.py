@@ -151,6 +151,7 @@ def init_db(db_path: Path | None = None) -> Path:
             ("sector", "TEXT"),
             ("industry", "TEXT"),
             ("market_cap", "REAL"),
+            ("beta", "REAL"),
         ]:
             if col_name not in ticker_cols:
                 conn.execute(f"ALTER TABLE tickers ADD COLUMN {col_name} {col_type}")

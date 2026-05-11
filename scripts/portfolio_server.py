@@ -515,7 +515,7 @@ def enrich_tickers():
 
     with connect() as conn:
         rows = conn.execute(
-            "SELECT symbol FROM tickers WHERE sector IS NULL OR name IS NULL ORDER BY symbol"
+            "SELECT symbol FROM tickers WHERE sector IS NULL OR name IS NULL OR beta IS NULL ORDER BY symbol"
         ).fetchall()
         targets = [r["symbol"] for r in rows]
 
@@ -534,7 +534,8 @@ def enrich_tickers():
                         name = COALESCE(?, name),
                         sector = COALESCE(?, sector),
                         industry = COALESCE(?, industry),
-                        market_cap = COALESCE(?, market_cap)
+                        market_cap = COALESCE(?, market_cap),
+                        beta = COALESCE(?, beta)
                     WHERE symbol = ?
                     """,
                     (
@@ -542,6 +543,7 @@ def enrich_tickers():
                         info.get("sector"),
                         info.get("industry"),
                         info.get("marketCap"),
+                        info.get("beta"),
                         sym,
                     ),
                 )
@@ -2006,10 +2008,9 @@ def today_view():
         }
         target_rows = conn.execute("SELECT symbol, target_pct FROM target_weights").fetchall()
         sector_target_rows = conn.execute("SELECT sector, target_pct FROM sector_targets").fetchall()
-        sector_lookup = {
-            r["symbol"]: r["sector"]
-            for r in conn.execute("SELECT symbol, sector FROM tickers WHERE sector IS NOT NULL").fetchall()
-        }
+        ticker_meta_rows = conn.execute("SELECT symbol, sector, beta FROM tickers").fetchall()
+    sector_lookup = {r["symbol"]: r["sector"] for r in ticker_meta_rows if r["sector"]}
+    beta_lookup = {r["symbol"]: r["beta"] for r in ticker_meta_rows if r["beta"] is not None}
 
     # Per-ticker portfolio aggregates for drift calculation
     target_weights = {r["symbol"]: r["target_pct"] for r in target_rows}
@@ -2069,6 +2070,12 @@ def today_view():
             sector_current_pct = (sector_total.get(sector, 0) / portfolio_total * 100) if portfolio_total else 0
             sector_drift_pct = (sector_target - sector_current_pct) if sector_target is not None else None
 
+            beta = beta_lookup.get(d["symbol"])
+            # Risk-weighted reduce sizing: beta × $ approximates market-risk
+            # dollar exposure. Sells with bigger risk exposure get sorted
+            # ahead — the goal of derisking is to cut risk, not just cash.
+            risk_value = (est_value or 0) * (beta if beta is not None else 1.0)
+
             items.append({
                 "ticker": d["symbol"],
                 "rating": d["rating"],
@@ -2093,6 +2100,8 @@ def today_view():
                 "sector_target_pct": sector_target,
                 "sector_current_pct": sector_current_pct,
                 "sector_drift_pct": sector_drift_pct,
+                "beta": beta,
+                "risk_value": risk_value,
                 "rationale": a.get("rationale", ""),
                 "bucket": _ACTION_BUCKETS.get(a.get("action", ""), "hold"),
             })
@@ -2137,7 +2146,9 @@ def today_view():
     # fundable, partially fundable, or blocked by the budget.
     accounts = []
     for acct in by_account.values():
-        acct["reduces"].sort(key=lambda x: -(x["est_value"] or 0))
+        # Reduces: sort by beta-weighted dollar exposure (risk_value), so a
+        # high-beta position trims ahead of a low-beta one of the same $ size.
+        acct["reduces"].sort(key=lambda x: -(x["risk_value"] or 0))
         acct["adds"].sort(key=lambda x: -_priority_score(x))
         acct["cash_in"] = sum((x["est_value"] or 0) for x in acct["reduces"])
         acct["cash_out"] = sum((x["est_value"] or 0) for x in acct["adds"])
