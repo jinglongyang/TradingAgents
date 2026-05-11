@@ -2875,6 +2875,15 @@ def run_result(run_id: str):
     else:
         report_html = "<p style='color:var(--fg-muted);'>REPORT.md not found in output dir.</p>"
 
+    failed_path = out_dir / "failed.txt"
+    failed_tickers: list[str] = []
+    if failed_path.exists():
+        failed_tickers = [
+            line.strip()
+            for line in failed_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
     log_text = Path(log_path).read_text()
     m = re.search(r"Will analyze \d+ ticker\(s\):\s*([^\n]+)", log_text)
     tickers_for_run = [t.strip() for t in (m.group(1) if m else "").split(",") if t.strip()]
@@ -2909,6 +2918,7 @@ def run_result(run_id: str):
             "rel_dir": str(rel_dir),
             "decisions": decisions,
             "report_html": report_html,
+            "failed_tickers": failed_tickers,
         },
     )
 

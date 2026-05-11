@@ -17,6 +17,14 @@
     <span style="color:var(--fg-muted);font-size:12px;margin-left:12px;">输出目录: <code>{{ rel_dir }}</code></span>
   </div>
 
+  {% if failed_tickers %}
+  <div style="background:#fef3c7;border:1px solid #d97706;color:#92400e;padding:12px 14px;border-radius:8px;margin-bottom:16px;">
+    <strong>⚠️ {{ failed_tickers|length }} 个 ticker 失败</strong>
+    （没产出决策，--resume 时会自动重试）：
+    {% for t in failed_tickers %}<code>{{ t }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+  </div>
+  {% endif %}
+
   <h2>本次 PM 评级（从 DB 拉最新）</h2>
   {% if decisions %}
     <table>

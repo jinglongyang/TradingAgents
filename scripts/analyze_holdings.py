@@ -179,17 +179,22 @@ def write_report(
     trade_date: str,
     portfolio_total: float,
     results: list[tuple[str, Holding, dict[str, Any]]],
+    failed: list[str] | None = None,
 ) -> None:
     """Render the human-readable REPORT.md."""
+    failed = failed or []
     lines = [
         f"# Portfolio Analysis — {trade_date}",
         "",
         f"Total analyzed portfolio value: **${portfolio_total:,.0f}**",
         f"Tickers analyzed: **{len(results)}**",
-        "",
-        "---",
-        "",
     ]
+    if failed:
+        lines.append(
+            f"⚠️ Failed (no decision, will retry on `--resume`): **{len(failed)}** — "
+            + ", ".join(sorted(failed))
+        )
+    lines.extend(["", "---", ""])
     for ticker, holding, state in results:
         rating_md = state.get("final_trade_decision", "(no decision)")
         lines.extend(
@@ -366,11 +371,13 @@ def main() -> int:
             log.exception("Failed on %s: %s", ticker, exc)
             return ticker, None
 
+    failed: list[str] = []
     indexed = list(enumerate(tickers, 1))
     if parallel == 1:
         for it in indexed:
             ticker, state = _analyze_one(it)
             if state is None:
+                failed.append(ticker)
                 continue
             results.append((ticker, holdings[ticker], state))
             write_per_ticker_json(per_ticker_dir, ticker, state)
@@ -381,6 +388,7 @@ def main() -> int:
             for fut in as_completed(futures):
                 ticker, state = fut.result()
                 if state is None:
+                    failed.append(ticker)
                     continue
                 results.append((ticker, holdings[ticker], state))
                 # Persist per-ticker JSON immediately so partial progress survives
@@ -388,8 +396,15 @@ def main() -> int:
                 write_per_ticker_json(per_ticker_dir, ticker, state)
 
     if results:
-        write_report(out_dir, args.trade_date, portfolio_total, results)
+        write_report(out_dir, args.trade_date, portfolio_total, results, failed=failed)
         write_csvs(out_dir, results)
+        # Persist the failure list separately so resume / /runs can read it
+        # without having to grep REPORT.md.
+        if failed:
+            (out_dir / "failed.txt").write_text(
+                "\n".join(sorted(failed)) + "\n", encoding="utf-8"
+            )
+            log.warning("Failed tickers (%d): %s", len(failed), ", ".join(sorted(failed)))
         log.info("All outputs written to %s", out_dir)
     else:
         log.error("No tickers produced results.")
