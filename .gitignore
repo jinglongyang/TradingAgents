@@ -2,7 +2,7 @@
 __pycache__/
 *.py[codz]
 *$py.class
-
+.DS_Store
 # Personal portfolio analysis outputs (contain private financial data)
 outputs/
 .claude/

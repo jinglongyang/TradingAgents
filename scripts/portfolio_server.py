@@ -14,7 +14,7 @@ All data stays on localhost. The DB is ~/.tradingagents/portfolio.db.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
 
 from dotenv import find_dotenv, load_dotenv
@@ -227,7 +227,11 @@ def _render(message: str = ""):
     <button class="success" onclick="openModal('run-modal')">🚀 运行 PM 分析</button>
     <a class="btn secondary" href="/owners">👥 按 Owner 看</a>
     <a class="btn secondary" href="/drift">⚠️ Drift Alert</a>
-    <a class="btn secondary" href="/decisions">📋 PM 分析 & 评级</a>
+    <a class="btn secondary" href="/tlh">💰 TLH Finder</a>
+    <a class="btn secondary" href="/correlation">🔗 相关性热力</a>
+    <a class="btn secondary" href="/wash-sale">🚫 Wash Sale</a>
+    <a class="btn secondary" href="/lots">📦 Cost Basis Lots</a>
+    <a class="btn secondary" href="/decisions">📋 PM 分析</a>
     <a class="btn secondary" href="/runs">🏃 运行历史</a>
     <a class="btn secondary" href="/executions">📒 交易记录</a>
     <a class="btn secondary" href="/api/positions" target="_blank">View JSON</a>
@@ -591,6 +595,420 @@ def sell(
     except Exception as e:  # noqa: BLE001
         msg = f'<div class="msg error">✗ 错误: {e}</div>'
     return _render(message=msg)
+
+
+@app.get("/lots", response_class=HTMLResponse)
+def lots_view(symbol: str = ""):
+    """Cost-basis lot ledger — each purchase tracked individually."""
+    with connect() as conn:
+        if symbol:
+            rows = conn.execute(
+                "SELECT * FROM cost_basis_lots WHERE symbol = ? ORDER BY purchase_date",
+                (symbol.upper(),),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM cost_basis_lots ORDER BY purchase_date DESC LIMIT 200"
+            ).fetchall()
+
+    body = ['<h1>📦 Cost Basis Lots</h1>',
+            '<p class="subtitle">每笔买入独立追踪 → 支持 FIFO / LIFO / specific-lot 卖出策略</p>',
+            '<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a>',
+            f' <button onclick="openModal(\'add-lot-modal\')">➕ 添加 Lot</button></div>']
+
+    if not rows:
+        body.append('<p style="color:var(--fg-muted);padding:20px;background:var(--bg-subtle);border-radius:8px;">还没有 lot 记录。点 "添加 Lot" 录入买入历史；以后所有买入都会出现在这里。</p>')
+    else:
+        # Group by symbol
+        from collections import defaultdict
+        by_sym = defaultdict(list)
+        for r in rows:
+            by_sym[r["symbol"]].append(r)
+
+        today = date.today()
+        for sym in sorted(by_sym):
+            lots = by_sym[sym]
+            total_shares = sum(l["shares"] for l in lots)
+            total_cost = sum(l["shares"] * l["cost_per_share"] for l in lots)
+            body.append(f'<h3 style="margin-top:24px;">{sym} · {total_shares:.3f} 股 · 总成本 ${total_cost:,.0f}</h3>')
+            body.append('<table><thead><tr><th>买入日期</th><th>持有天数</th><th>持有期</th><th>账户</th><th class="num">股数</th><th class="num">单价</th><th class="num">小计</th><th>备注</th></tr></thead><tbody>')
+            for l in lots:
+                purchase = datetime.strptime(l["purchase_date"], "%Y-%m-%d").date()
+                days = (today - purchase).days
+                term = "长期" if days > 365 else f"短期 ({365 - days} 天后变长期)"
+                cost = l["shares"] * l["cost_per_share"]
+                body.append(
+                    f'<tr><td>{l["purchase_date"]}</td>'
+                    f'<td class="num">{days}</td>'
+                    f'<td>{term}</td>'
+                    f'<td>{l["account_name"]}</td>'
+                    f'<td class="num">{l["shares"]:.3f}</td>'
+                    f'<td class="num">${l["cost_per_share"]:.2f}</td>'
+                    f'<td class="num">${cost:,.0f}</td>'
+                    f'<td style="font-size:12px;color:var(--fg-muted);">{l["note"] or ""}</td></tr>'
+                )
+            body.append('</tbody></table>')
+
+    add_modal = """
+<div class="modal-backdrop" id="add-lot-modal">
+  <div class="modal">
+    <h3>添加 Cost Basis Lot</h3>
+    <form method="post" action="/lots/add">
+      <div class="row">
+        <div class="field"><label>买入日期</label><input name="purchase_date" type="date" required></div>
+        <div class="field"><label>Ticker</label><input name="symbol" required style="text-transform:uppercase"></div>
+      </div>
+      <div class="row">
+        <div class="field"><label>账户名</label><input name="account_name" required></div>
+        <div class="field"><label>Account ID</label><input name="account_id" required></div>
+      </div>
+      <div class="row">
+        <div class="field"><label>股数</label><input name="shares" type="number" step="0.001" required></div>
+        <div class="field"><label>单价（每股）</label><input name="cost_per_share" type="number" step="0.01" required></div>
+      </div>
+      <div class="field"><label>备注</label><input name="note" placeholder="可选"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+        <button type="button" class="secondary" onclick="closeModal('add-lot-modal')">取消</button>
+        <button type="submit" class="success">添加</button>
+      </div>
+    </form>
+  </div>
+</div>
+<script>
+function openModal(id) { document.getElementById(id).classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+</script>"""
+
+    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cost Basis Lots</title><style>{CSS}</style></head><body><div class="container">
+{''.join(body)}
+{add_modal}
+</div></body></html>"""
+
+
+@app.post("/lots/add", response_class=HTMLResponse)
+def lots_add(
+    purchase_date: str = Form(...),
+    account_id: str = Form(...),
+    account_name: str = Form(...),
+    symbol: str = Form(...),
+    shares: float = Form(...),
+    cost_per_share: float = Form(...),
+    note: str = Form(""),
+):
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO cost_basis_lots
+              (purchase_date, account_id, account_name, symbol, shares, cost_per_share, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (purchase_date, account_id.strip(), account_name.strip(),
+             symbol.strip().upper(), shares, cost_per_share, note.strip()),
+        )
+    return RedirectResponse(url="/lots", status_code=303)
+
+
+@app.get("/wash-sale", response_class=HTMLResponse)
+def wash_sale_view():
+    """Detect potential wash sale violations.
+
+    IRS rule: selling a security at a loss disallows the loss deduction if
+    you buy a "substantially identical" security within 30 days before or
+    after the sale (61-day window total).
+    """
+    from datetime import timedelta as _td
+
+    with connect() as conn:
+        # Get all SELL executions where we likely had a loss
+        sells = conn.execute(
+            """
+            SELECT e.*, p.cost_basis_total / NULLIF(p.quantity, 0) as avg_cost
+            FROM executions e
+            LEFT JOIN positions_snapshot p
+              ON p.symbol = e.symbol AND p.account_id = e.account_id
+            WHERE e.action = 'SELL'
+            ORDER BY e.trade_date DESC
+            """
+        ).fetchall()
+
+        # Get all BUY executions
+        buys = conn.execute(
+            "SELECT * FROM executions WHERE action = 'BUY'"
+        ).fetchall()
+
+    alerts = []
+    for sell in sells:
+        sell_date = datetime.strptime(sell["trade_date"], "%Y-%m-%d").date()
+        # Check if it was at a loss
+        avg_cost = sell["avg_cost"] or 0
+        is_loss = avg_cost > 0 and sell["price"] < avg_cost
+        if not is_loss:
+            continue
+
+        # Look for buys of same symbol within 30 days (any account, any owner)
+        for buy in buys:
+            if buy["symbol"] != sell["symbol"]:
+                continue
+            buy_date = datetime.strptime(buy["trade_date"], "%Y-%m-%d").date()
+            delta_days = (buy_date - sell_date).days
+            if -30 <= delta_days <= 30 and buy["execution_id"] != sell["execution_id"]:
+                alerts.append({
+                    "symbol": sell["symbol"],
+                    "sell_date": sell["trade_date"],
+                    "sell_account": sell["account_name"],
+                    "sell_shares": sell["shares"],
+                    "sell_price": sell["price"],
+                    "buy_date": buy["trade_date"],
+                    "buy_account": buy["account_name"],
+                    "buy_shares": buy["shares"],
+                    "buy_price": buy["price"],
+                    "delta_days": delta_days,
+                    "estimated_loss": (avg_cost - sell["price"]) * sell["shares"],
+                })
+
+    body = []
+    body.append(f'<div class="status">扫描了 {len(sells)} 笔卖出 × {len(buys)} 笔买入。<strong>{len(alerts)}</strong> 个潜在 wash sale 警告。</div>')
+
+    if not alerts:
+        body.append('<p style="color:var(--fg-muted);padding:20px;background:var(--bg-subtle);border-radius:8px;">✅ 当前没有 wash sale 风险。</p>')
+    else:
+        body.append('<table><thead><tr><th>Ticker</th><th>卖出</th><th>买回</th><th class="num">间隔（天）</th><th class="num">受影响损失</th><th>风险</th></tr></thead><tbody>')
+        for a in alerts:
+            severity = "🔴 高" if abs(a["delta_days"]) <= 30 else ""
+            body.append(
+                f'<tr>'
+                f'<td><strong>{a["symbol"]}</strong></td>'
+                f'<td>{a["sell_date"]} · {a["sell_shares"]:.2f} @ ${a["sell_price"]:.2f}<br>'
+                f'<span style="font-size:11px;color:var(--fg-muted);">{a["sell_account"]}</span></td>'
+                f'<td>{a["buy_date"]} · {a["buy_shares"]:.2f} @ ${a["buy_price"]:.2f}<br>'
+                f'<span style="font-size:11px;color:var(--fg-muted);">{a["buy_account"]}</span></td>'
+                f'<td class="num">{a["delta_days"]:+d}</td>'
+                f'<td class="num loss">−${a["estimated_loss"]:,.0f}</td>'
+                f'<td>{severity}</td>'
+                f'</tr>'
+            )
+        body.append('</tbody></table>')
+
+    body.append('''
+<details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-top:24px;border:1px solid var(--border);">
+<summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 Wash Sale Rule 详解</summary>
+<ul style="margin-top:12px;font-size:13px;line-height:1.7;">
+<li><strong>定义</strong>：IRS 规则 — 卖出有损失的证券后 30 天内（前后各 30 天，<strong>61 天总窗口</strong>）买回 substantially identical 证券，损失不能抵税。</li>
+<li><strong>什么算 substantially identical</strong>：同一 ticker；同公司不同 share class（罕见）；密切跟踪同一指数的 ETF 之间也可能（争议）。</li>
+<li><strong>跨账户 + 跨配偶</strong>：⚠️ Wash sale rule 适用于<strong>你和配偶的全部账户</strong>（包括 401k / IRA）。所以这个工具扫描了所有账户的交易。</li>
+<li><strong>常见错误</strong>：401k 自动定投 + 同时在 taxable 卖出同一只股 → 触发 wash sale。</li>
+<li><strong>合法替代品</strong>：卖 VOO 想保持大盘敞口 → 买 IVV 或 SPLG（不同发行商但都跟踪 S&amp;P 500，争议小）。卖 NVDA → 买半导体 ETF（SOXX/SMH）肯定 OK。</li>
+<li><strong>后果</strong>：损失加到买回的 cost basis，所以税务上是 deferred 而不是 lost。但当年抵税计划被打乱。</li>
+</ul>
+</details>
+''')
+
+    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wash Sale Alert</title><style>{CSS}</style></head><body><div class="container">
+<h1>🚫 Wash Sale 警告</h1>
+<p class="subtitle">检测 61 天窗口内"卖出损失 + 买回同票"的潜在违规</p>
+<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>
+{"".join(body)}
+</div></body></html>"""
+
+
+@app.get("/correlation", response_class=HTMLResponse)
+def correlation_view():
+    """Pairwise correlation matrix of top holdings over the past 90 days."""
+    import yfinance as yf
+    import pandas as pd
+    import numpy as np
+
+    latest = latest_snapshot_date()
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT symbol, SUM(current_value) v FROM positions_snapshot
+            WHERE import_date = ? GROUP BY symbol
+            ORDER BY v DESC LIMIT 20
+            """,
+            (latest,) if latest else (date.today().isoformat(),),
+        ).fetchall()
+
+    tickers = [r["symbol"] for r in rows]
+    if len(tickers) < 2:
+        return HTMLResponse(f"<p>至少需要 2 个持仓</p><a href='/'>← Back</a>")
+
+    try:
+        data = yf.download(tickers, period="90d", progress=False, auto_adjust=True)["Close"]
+        # Handle single-ticker DataFrame edge case
+        if isinstance(data, pd.Series):
+            data = data.to_frame()
+        returns = data.pct_change().dropna()
+        corr = returns.corr()
+    except Exception as e:
+        return HTMLResponse(f"<p>yfinance 错误: {e}</p><a href='/'>← Back</a>")
+
+    # Reorder by total value (already sorted by SQL)
+    valid = [t for t in tickers if t in corr.columns]
+    corr = corr.loc[valid, valid]
+
+    # Build SVG heatmap
+    n = len(valid)
+    cell = 36
+    label_w = 70
+    width = label_w + n * cell + 20
+    height = label_w + n * cell + 60
+
+    def color(v: float) -> str:
+        """Blue (-1) → white (0) → red (+1)."""
+        if v >= 0:
+            r = 255
+            g = int(255 - v * 200)
+            b = int(255 - v * 200)
+        else:
+            v = -v
+            r = int(255 - v * 200)
+            g = int(255 - v * 200)
+            b = 255
+        return f"rgb({r},{g},{b})"
+
+    svg = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" font-family="ui-monospace, monospace" font-size="11">']
+    # Column labels (top, rotated)
+    for j, sym in enumerate(valid):
+        x = label_w + j * cell + cell / 2
+        svg.append(f'<text x="{x}" y="{label_w - 6}" transform="rotate(-45 {x} {label_w - 6})" text-anchor="start" fill="#666">{sym}</text>')
+    # Cells + row labels
+    for i, sym_i in enumerate(valid):
+        svg.append(f'<text x="{label_w - 6}" y="{label_w + i * cell + cell / 2 + 4}" text-anchor="end" fill="#666">{sym_i}</text>')
+        for j, sym_j in enumerate(valid):
+            v = corr.iloc[i, j]
+            if pd.isna(v):
+                continue
+            x = label_w + j * cell
+            y = label_w + i * cell
+            svg.append(f'<rect x="{x}" y="{y}" width="{cell}" height="{cell}" fill="{color(v)}" stroke="#fff" stroke-width="0.5"/>')
+            # Show value in cell for readability
+            text_color = "#000" if abs(v) < 0.7 else "#fff"
+            svg.append(f'<text x="{x + cell/2}" y="{y + cell/2 + 3}" text-anchor="middle" fill="{text_color}" font-size="10">{v:.2f}</text>')
+    svg.append('</svg>')
+
+    # Find high-correlation pairs (excluding self)
+    high_pairs = []
+    for i, t1 in enumerate(valid):
+        for j, t2 in enumerate(valid):
+            if i >= j:
+                continue
+            v = corr.iloc[i, j]
+            if pd.isna(v):
+                continue
+            if v > 0.85:
+                high_pairs.append((t1, t2, float(v)))
+    high_pairs.sort(key=lambda x: -x[2])
+
+    high_pairs_html = ""
+    if high_pairs:
+        high_pairs_html = '<h3 style="margin-top:24px;">⚠️ 高度相关对（&gt; 0.85） — 隐性集中度</h3>'
+        high_pairs_html += '<p style="color:var(--fg-muted);font-size:13px;">这些 ticker 走势几乎一致 — 持有多个 = 没有真正分散。考虑只留一个或整合 ETF。</p>'
+        high_pairs_html += '<table><thead><tr><th>Ticker A</th><th>Ticker B</th><th class="num">相关系数</th></tr></thead><tbody>'
+        for t1, t2, v in high_pairs[:15]:
+            high_pairs_html += f'<tr><td><strong>{t1}</strong></td><td><strong>{t2}</strong></td><td class="num loss">{v:.3f}</td></tr>'
+        high_pairs_html += '</tbody></table>'
+
+    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>相关性热力图</title><style>{CSS}</style></head><body><div class="container">
+<h1>🔗 持仓相关性热力图</h1>
+<p class="subtitle">过去 90 天日收益率的皮尔逊相关系数 · top {n} 持仓</p>
+<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>
+<details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-bottom:16px;border:1px solid var(--border);">
+<summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 如何读热力图</summary>
+<ul style="margin-top:12px;font-size:13px;line-height:1.7;">
+<li><strong>红色 (1.0)</strong> = 走势完全一致 → 实际上是同一种暴露</li>
+<li><strong>白色 (0.0)</strong> = 完全独立 → 真分散</li>
+<li><strong>蓝色 (-1.0)</strong> = 完全反向 → 对冲</li>
+<li><strong>0.85+ 的对</strong>：考虑整合（持有多只 = 隐性集中度）</li>
+<li><strong>大盘 ETF (VOO/QQQ)</strong> 通常和大科技高相关 — 重复持有意义有限</li>
+</ul>
+</details>
+<div style="background:var(--bg-subtle);padding:20px;border-radius:8px;border:1px solid var(--border);overflow-x:auto;">
+{"".join(svg)}
+</div>
+{high_pairs_html}
+</div></body></html>"""
+
+
+@app.get("/tlh", response_class=HTMLResponse)
+def tlh_view():
+    """Tax-Loss Harvest candidates: taxable accounts with unrealized losses."""
+    from tradingagents.portfolio.tax import estimate_sell_tax
+
+    latest = latest_snapshot_date()
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM positions_snapshot
+            WHERE import_date = ? AND account_type = 'Taxable'
+              AND current_value > 0 AND cost_basis_total > 0
+              AND current_value < cost_basis_total
+            ORDER BY (cost_basis_total - current_value) DESC
+            """,
+            (latest,) if latest else (date.today().isoformat(),),
+        ).fetchall()
+
+    if not rows:
+        body = '<p style="color:var(--fg-muted);padding:20px;background:var(--bg-subtle);border-radius:8px;">🎉 当前没有 taxable 账户的浮亏仓位 — 没 TLH 机会。</p>'
+        total_loss = 0.0
+        total_savings = 0.0
+    else:
+        body_rows = []
+        total_loss = 0.0
+        total_savings = 0.0
+        for r in rows:
+            loss = r["cost_basis_total"] - r["current_value"]
+            loss_pct = loss / r["cost_basis_total"] * 100 if r["cost_basis_total"] else 0
+            # Estimate tax savings (high bracket: 37% ST or 23.8% LT + NIIT)
+            # Assume long-term for conservative estimate
+            est_savings_lt = loss * 0.238  # 20% LTCG + 3.8% NIIT
+            est_savings_st = loss * 0.37
+            total_loss += loss
+            total_savings += est_savings_lt  # conservative
+            body_rows.append(
+                f'<tr>'
+                f'<td><strong>{r["symbol"]}</strong></td>'
+                f'<td>{r["account_name"]} <span class="tag" style="font-size:10px;">🏦 {r["broker"] or "?"}</span></td>'
+                f'<td class="num">{r["quantity"]:.3f}</td>'
+                f'<td class="num">${r["current_value"]:,.0f}</td>'
+                f'<td class="num">${r["cost_basis_total"]:,.0f}</td>'
+                f'<td class="num loss">−${loss:,.0f} ({loss_pct:.1f}%)</td>'
+                f'<td class="num gain">${est_savings_lt:,.0f}</td>'
+                f'<td class="num gain">${est_savings_st:,.0f}</td>'
+                f'</tr>'
+            )
+        body = f'''
+<div class="status">
+  💡 共 <strong>{len(rows)}</strong> 个 TLH 候选 · 总浮亏 <strong>${total_loss:,.0f}</strong> ·
+  估算抵税 <strong>${total_savings:,.0f}</strong>（按长期资本利得 23.8% 计算）
+</div>
+<table><thead><tr>
+<th>Ticker</th><th>账户</th><th class="num">股数</th><th class="num">市值</th><th class="num">成本</th><th class="num">浮亏</th>
+<th class="num">LT 抵税估算</th><th class="num">ST 抵税估算</th>
+</tr></thead><tbody>{"".join(body_rows)}</tbody></table>
+
+<details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-top:24px;border:1px solid var(--border);">
+<summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 TLH 操作指南</summary>
+<ul style="margin-top:12px;font-size:13px;line-height:1.7;">
+<li><strong>什么是 TLH</strong>：Tax-Loss Harvesting — 卖出浮亏仓位 → 实现资本损失 → 抵消同年其他资本利得（或最多 $3,000 抵消普通收入）。</li>
+<li><strong>税率假设</strong>：LT（长期持有 &gt;1 年）= 20% LTCG + 3.8% NIIT = 23.8%；ST（短期 ≤1 年）= 37% 最高边际税率 + 3.8% NIIT。</li>
+<li><strong>Wash Sale Rule</strong>：卖出后 30 天内（前后各 30 天）不能买回 substantially identical 证券 — 否则 IRS 不让抵亏损。⚠️ 查 <a href="/wash-sale">Wash Sale Alert</a> 页面避免。</li>
+<li><strong>替代品策略</strong>：卖 NVDA 想保持半导体敞口 → 买 SOXX/SMH ETF（不算 substantially identical）。</li>
+<li><strong>结转</strong>：当年无法抵消的损失可结转到未来无限期。</li>
+</ul>
+</details>
+'''
+
+    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TLH Finder</title><style>{CSS}</style></head><body><div class="container">
+<h1>💰 Tax-Loss Harvest 候选</h1>
+<p class="subtitle">应税账户中的浮亏仓位 — 卖出可实现资本损失抵税</p>
+<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>
+{body}
+</div></body></html>"""
 
 
 @app.get("/drift", response_class=HTMLResponse)
@@ -966,7 +1384,7 @@ def run_analysis(
     """Spawn analysis subprocess for tickers / sector / full portfolio."""
     import os as _os
     import subprocess as _sp
-    from datetime import datetime as _dt
+    from datetime import date, datetimetime as _dt
 
     run_id = _dt.now().strftime("%Y%m%d_%H%M%S")
     log_path = f"/tmp/pm_run_{run_id}.log"

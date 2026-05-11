@@ -112,6 +112,26 @@ def init_db(db_path: Path | None = None) -> Path:
         if "broker" not in cols:
             conn.execute("ALTER TABLE positions_snapshot ADD COLUMN broker TEXT")
             conn.execute("UPDATE positions_snapshot SET broker = 'Fidelity' WHERE broker IS NULL")
+        # New table: cost_basis_lots for per-purchase lot tracking
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cost_basis_lots (
+                lot_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                purchase_date TEXT NOT NULL,
+                account_id    TEXT NOT NULL,
+                account_name  TEXT NOT NULL,
+                symbol        TEXT NOT NULL,
+                shares        REAL NOT NULL,
+                cost_per_share REAL NOT NULL,
+                broker        TEXT,
+                note          TEXT,
+                created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_lots_symbol ON cost_basis_lots (symbol)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_lots_account ON cost_basis_lots (account_id, symbol)")
+
         if "owner" not in cols:
             conn.execute("ALTER TABLE positions_snapshot ADD COLUMN owner TEXT")
             # Best-effort backfill based on account_name patterns
