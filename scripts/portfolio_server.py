@@ -309,6 +309,7 @@ def _render(message: str = ""):
     <a class="btn secondary" href="/thesis-evolution">📈 Thesis 演变</a>
     <a class="btn secondary" href="/charts">📊 Charts</a>
     <a class="btn secondary" href="/sectors">🌐 板块轮动</a>
+    <a class="btn secondary" href="/tickers">🗂️ Tickers</a>
     <a class="btn secondary" href="/performance">🎯 PM 准确度</a>
     <a class="btn secondary" href="/runs">🏃 运行历史</a>
     <a class="btn secondary" href="/executions">📒 交易记录</a>
@@ -613,9 +614,10 @@ def delete_row(snapshot_id: int = Form(...)):
 
 @app.post("/update-prices")
 def update_prices():
-    """Refresh last_price + current_value for every position by polling yfinance."""
+    """Refresh prices in the canonical tickers table + sync to positions cache."""
     import yfinance as _yf
     from urllib.parse import quote as _quote
+    from datetime import datetime as _dt
 
     latest = latest_snapshot_date()
     if not latest:
@@ -640,12 +642,13 @@ def update_prices():
     if isinstance(data, _pd.Series):
         data = data.to_frame()
 
-    updated = 0
+    updated_rows = 0
+    tickers_written = 0
     missing = []
+    now_iso = _dt.now().isoformat(timespec="seconds")
     with connect() as conn:
         for symbol in symbols:
             if symbol not in data.columns:
-                # Try direct fetch for single-symbol edge cases
                 try:
                     hist = _yf.Ticker(symbol).history(period="5d")
                     if len(hist) == 0:
@@ -662,6 +665,20 @@ def update_prices():
                     continue
                 price = float(ser.iloc[-1])
 
+            # 1. Upsert canonical price in tickers (single source of truth)
+            conn.execute(
+                """
+                INSERT INTO tickers (symbol, last_price, last_updated)
+                VALUES (?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    last_price = excluded.last_price,
+                    last_updated = excluded.last_updated
+                """,
+                (symbol, price, now_iso),
+            )
+            tickers_written += 1
+
+            # 2. Sync to positions_snapshot cache (backwards compat for existing SELECTs)
             cur = conn.execute(
                 """
                 UPDATE positions_snapshot
@@ -670,9 +687,11 @@ def update_prices():
                 """,
                 (price, price, latest, symbol),
             )
-            updated += cur.rowcount
+            updated_rows += cur.rowcount
 
-    msg = f"✓ 更新了 {updated} 行 ({len(symbols)} 个 ticker)"
+    updated = updated_rows
+
+    msg = f"✓ {tickers_written} ticker 写入 canonical tickers 表 · {updated} 行 positions sync"
     if missing:
         msg += f" · 拉取失败: {', '.join(missing[:10])}"
     return RedirectResponse(url="/?msg=" + _quote(msg), status_code=303)
@@ -1698,6 +1717,59 @@ def sectors_view():
 
     return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>板块轮动</title><style>{CSS}</style></head><body><div class="container">
+{''.join(body)}
+</div></body></html>"""
+
+
+@app.get("/tickers", response_class=HTMLResponse)
+def tickers_view():
+    """Canonical ticker registry — single source of truth for prices/metadata."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM tickers ORDER BY symbol"
+        ).fetchall()
+        # Count how many positions reference each ticker
+        ref_counts = {r["symbol"]: r["c"] for r in conn.execute(
+            """
+            SELECT symbol, COUNT(*) c FROM positions_snapshot
+            WHERE import_date = (SELECT MAX(import_date) FROM positions_snapshot)
+            GROUP BY symbol
+            """
+        ).fetchall()}
+
+    body = ['<h1>🗂️ Ticker Registry</h1>',
+            '<p class="subtitle">所有股票的权威价格表 — positions_snapshot 引用这里。点 📡 更新价格 同步。</p>',
+            '<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>']
+    if not rows:
+        body.append('<p style="color:var(--fg-muted);">还没有 ticker 记录 — 点主页 📡 更新价格 初始化。</p>')
+    else:
+        body.append(f'<div class="status">📊 <strong>{len(rows)}</strong> 个 ticker · 在 <strong>{sum(ref_counts.values())}</strong> 行 positions 中被引用</div>')
+        body.append('<table><thead><tr><th>Ticker</th><th class="num">最新价</th><th class="num">引用行数</th><th>最近更新</th></tr></thead><tbody>')
+        for r in rows:
+            n_refs = ref_counts.get(r["symbol"], 0)
+            price = f"${r['last_price']:.2f}" if r["last_price"] else "—"
+            body.append(
+                f'<tr><td><strong><a href="/lookup?q={r["symbol"]}">{r["symbol"]}</a></strong></td>'
+                f'<td class="num">{price}</td>'
+                f'<td class="num">{n_refs}</td>'
+                f'<td style="font-size:12px;color:var(--fg-muted);">{r["last_updated"] or "—"}</td></tr>'
+            )
+        body.append('</tbody></table>')
+
+    body.append('''
+<details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-top:24px;border:1px solid var(--border);">
+<summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 Normalization 设计</summary>
+<ul style="margin-top:12px;font-size:13px;line-height:1.7;">
+<li><strong>问题</strong>：同一 ticker 在 N 个账户里出现，原本每行都重复存 last_price — 更新要 UPDATE N 次，可能不一致。</li>
+<li><strong>方案</strong>：tickers 表是<strong>权威价格源</strong>（每个 ticker 一行）。positions_snapshot.last_price 保留作 cache。</li>
+<li><strong>更新流</strong>：点 📡 更新价格 → yfinance 批量拉 → UPSERT tickers → SYNC 到 positions_snapshot.last_price。</li>
+<li><strong>未来扩展</strong>：tickers 表可加 sector / market_cap / dividend_yield / target_price 等元数据，所有 ticker 一处维护。</li>
+</ul>
+</details>
+''')
+
+    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ticker Registry</title><style>{CSS}</style></head><body><div class="container">
 {''.join(body)}
 </div></body></html>"""
 

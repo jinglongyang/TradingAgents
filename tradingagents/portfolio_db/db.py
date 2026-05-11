@@ -24,6 +24,17 @@ DEFAULT_DB_PATH = Path(
 
 
 SCHEMA = """
+-- Ticker registry: single source of truth for symbol → price / metadata.
+-- positions_snapshot.last_price is kept as a denormalized cache (for backwards
+-- compatibility with existing SELECTs) but the authoritative price lives here.
+CREATE TABLE IF NOT EXISTS tickers (
+    symbol         TEXT PRIMARY KEY,
+    last_price     REAL,
+    name           TEXT,         -- company name (fetched on demand)
+    sector         TEXT,         -- e.g. Technology
+    last_updated   TEXT          -- ISO timestamp
+);
+
 -- Snapshot of holdings imported from a broker CSV. Multiple snapshots per
 -- ticker (one per import_date). Source of truth = broker; DB = audit trail.
 CREATE TABLE IF NOT EXISTS positions_snapshot (
