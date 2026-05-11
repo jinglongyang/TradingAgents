@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}{{ ticker }} — 综合视图{% endblock %}
+
+{% block content %}
+  <h1>🔍 {{ ticker }}</h1>
+  <div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>
+
+  {% if positions %}
+    <div class="status" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px;">
+      <div><div style="color:var(--fg-muted);font-size:12px;">总价值</div><strong style="font-size:18px;">${{ "{:,.0f}".format(totals.value) }}</strong></div>
+      <div><div style="color:var(--fg-muted);font-size:12px;">总成本</div><strong style="font-size:18px;">${{ "{:,.0f}".format(totals.cost) }}</strong></div>
+      <div>
+        <div style="color:var(--fg-muted);font-size:12px;">P/L</div>
+        <strong class="{{ totals.pl_class }}" style="font-size:18px;">
+          {{ "%+.1f"|format(totals.pl_pct) }}% (${{ "{:+,.0f}".format(totals.pl) }})
+        </strong>
+      </div>
+      <div><div style="color:var(--fg-muted);font-size:12px;">合计股数</div><strong style="font-size:18px;">{{ "%.3f"|format(totals.shares) }}</strong></div>
+      <div><div style="color:var(--fg-muted);font-size:12px;">账户数</div><strong style="font-size:18px;">{{ positions|length }}</strong></div>
+    </div>
+  {% else %}
+    <div class="msg">⚠️ <strong>未持仓</strong> — 这是探索性查询。可以触发新股票分析。</div>
+  {% endif %}
+
+  <h2 style="margin-top:24px;">📋 PM 评级</h2>
+  {% if decision %}
+    <div class="status" style="border-left:3px solid var(--accent);">
+      <span class="tag tag-{{ decision.rating|lower }}" style="padding:4px 12px;font-size:14px;">{{ decision.rating }}</span>
+      · 分析日期 {{ decision.trade_date }}
+      · {{ decision.n_actions }} 账户级动作 ·
+      <a href="/decisions/{{ ticker }}">查看完整 thesis →</a>
+    </div>
+  {% else %}
+    <p style="color:var(--fg-muted);">⏳ 还没分析过 — 用下方按钮触发。</p>
+  {% endif %}
+
+  <h2 style="margin-top:24px;">🚀 触发 PM 分析</h2>
+  <form method="post" action="/run" style="display:flex;gap:8px;align-items:flex-start;">
+    <input type="hidden" name="mode" value="tickers">
+    <input type="hidden" name="tickers" value="{{ ticker }}">
+    <input name="instruction" placeholder="可选指令（如：避免 $5K+ 资本利得）"
+           style="flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);">
+    <button type="submit" class="success">🚀 启动</button>
+  </form>
+
+  {% if positions %}
+    <h2 style="margin-top:32px;">📊 跨账户持仓</h2>
+    <table>
+      <thead><tr>
+        <th>账户</th><th>类型</th><th>Broker</th><th>Owner</th>
+        <th class="num">股数</th><th class="num">价值</th><th class="num">成本</th><th class="num">P/L%</th>
+      </tr></thead>
+      <tbody>
+        {% for p in positions %}
+        <tr>
+          <td>{{ p.account_name }}</td>
+          <td><span class="tag tag-{{ p.account_type|lower }}">{{ p.account_type }}</span></td>
+          <td>🏦 {{ p.broker }}</td>
+          <td>👤 {{ p.owner }}</td>
+          <td class="num">{{ "%.3f"|format(p.quantity) }}</td>
+          <td class="num">${{ "{:,.0f}".format(p.current_value) }}</td>
+          <td class="num">${{ "{:,.0f}".format(p.cost) }}</td>
+          <td class="num {{ p.pl_class }}">{{ "%+.1f"|format(p.pl_pct) }}%</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+
+  {% if executions %}
+    <h2 style="margin-top:32px;">📒 最近交易（最多 10 笔）</h2>
+    <table>
+      <thead><tr><th>日期</th><th>动作</th><th class="num">股数</th><th class="num">价格</th><th>账户</th><th>备注</th></tr></thead>
+      <tbody>
+        {% for e in executions %}
+        <tr>
+          <td>{{ e.trade_date }}</td>
+          <td>
+            <span class="tag" style="background:var(--{{ 'danger' if e.action == 'SELL' else 'success' }});color:white;padding:2px 8px;">
+              {{ e.action }}
+            </span>
+          </td>
+          <td class="num">{{ "%.3f"|format(e.shares) }}</td>
+          <td class="num">${{ "%.2f"|format(e.price) }}</td>
+          <td>{{ e.account_name }}</td>
+          <td style="font-size:12px;color:var(--fg-muted);">{{ e.note or "" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+
+  {% if lots_count %}
+    <h2 style="margin-top:32px;">📦 Cost Basis Lots ({{ lots_count }})</h2>
+    <p style="color:var(--fg-muted);font-size:13px;">
+      <a href="/lots?symbol={{ ticker }}">查看完整 lot 列表 →</a>
+    </p>
+  {% endif %}
+{% endblock %}

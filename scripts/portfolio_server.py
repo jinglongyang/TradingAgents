@@ -86,6 +86,11 @@ td.actions button { margin-left: 6px; }
 .tag-taxdeferred { background: color-mix(in srgb, var(--success) 30%, transparent); color: var(--success); }
 .tag-taxable { background: color-mix(in srgb, var(--warning) 30%, transparent); color: var(--warning); }
 .tag-childedu { background: color-mix(in srgb, var(--accent) 30%, transparent); color: var(--accent); }
+.tag-buy { background: color-mix(in srgb, var(--success) 30%, transparent); color: var(--success); }
+.tag-overweight { background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); }
+.tag-hold { background: var(--border); color: var(--fg-muted); }
+.tag-underweight { background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }
+.tag-sell { background: color-mix(in srgb, var(--danger) 30%, transparent); color: var(--danger); }
 .gain { color: var(--success); }
 .loss { color: var(--danger); }
 .modal-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 100; align-items: center; justify-content: center; padding: 20px; }
@@ -716,125 +721,60 @@ def lookup_view(q: str):
             """,
             (ticker, latest) if latest else (ticker, date.today().isoformat()),
         ).fetchall()
-        decision = conn.execute(
+        decision_row = conn.execute(
             "SELECT * FROM decisions WHERE symbol = ? ORDER BY trade_date DESC LIMIT 1",
             (ticker,),
         ).fetchone()
-        executions = conn.execute(
+        executions = [dict(e) for e in conn.execute(
             "SELECT * FROM executions WHERE symbol = ? ORDER BY trade_date DESC LIMIT 10",
             (ticker,),
-        ).fetchall()
-        lots = conn.execute(
-            "SELECT * FROM cost_basis_lots WHERE symbol = ? ORDER BY purchase_date DESC",
-            (ticker,),
-        ).fetchall()
+        ).fetchall()]
+        lots_count = conn.execute(
+            "SELECT COUNT(*) c FROM cost_basis_lots WHERE symbol = ?", (ticker,),
+        ).fetchone()["c"]
 
-    total_value = sum(r["current_value"] for r in pos_rows) if pos_rows else 0
-    total_cost = sum(r["cost_basis_total"] or 0 for r in pos_rows) if pos_rows else 0
-    total_shares = sum(r["quantity"] for r in pos_rows) if pos_rows else 0
-    pl = total_value - total_cost if total_cost else 0
+    positions: list[dict] = []
+    for r in pos_rows:
+        cost = r["cost_basis_total"] or 0
+        pl_pct = (r["current_value"] - cost) / cost * 100 if cost else 0
+        positions.append({
+            "account_name": r["account_name"],
+            "account_type": r["account_type"],
+            "broker": r["broker"] or "—",
+            "owner": r["owner"] or "—",
+            "quantity": r["quantity"],
+            "current_value": r["current_value"],
+            "cost": cost, "pl_pct": pl_pct,
+            "pl_class": "gain" if pl_pct >= 0 else "loss",
+        })
+
+    total_value = sum(r["current_value"] for r in pos_rows)
+    total_cost = sum(r["cost_basis_total"] or 0 for r in pos_rows)
+    total_shares = sum(r["quantity"] for r in pos_rows)
+    pl = total_value - total_cost
     pl_pct = pl / total_cost * 100 if total_cost else 0
+    totals = {
+        "value": total_value, "cost": total_cost, "shares": total_shares,
+        "pl": pl, "pl_pct": pl_pct,
+        "pl_class": "gain" if pl >= 0 else "loss",
+    }
 
-    body = [f'<h1>🔍 {ticker}</h1>']
-    body.append('<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>')
+    decision = None
+    if decision_row:
+        actions = _json.loads(decision_row["account_actions"] or "[]")
+        decision = {
+            "rating": decision_row["rating"],
+            "trade_date": decision_row["trade_date"],
+            "n_actions": len(actions),
+        }
 
-    # Header summary
-    if pos_rows:
-        pl_class = "gain" if pl >= 0 else "loss"
-        body.append(f'''
-<div class="status" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px;">
-  <div><div style="color:var(--fg-muted);font-size:12px;">总价值</div><strong style="font-size:18px;">${total_value:,.0f}</strong></div>
-  <div><div style="color:var(--fg-muted);font-size:12px;">总成本</div><strong style="font-size:18px;">${total_cost:,.0f}</strong></div>
-  <div><div style="color:var(--fg-muted);font-size:12px;">P/L</div><strong class="{pl_class}" style="font-size:18px;">{pl_pct:+.1f}% (${pl:+,.0f})</strong></div>
-  <div><div style="color:var(--fg-muted);font-size:12px;">合计股数</div><strong style="font-size:18px;">{total_shares:,.3f}</strong></div>
-  <div><div style="color:var(--fg-muted);font-size:12px;">账户数</div><strong style="font-size:18px;">{len(pos_rows)}</strong></div>
-</div>
-''')
-    else:
-        body.append('<div class="msg">⚠️ <strong>未持仓</strong> — 这是探索性查询。可以触发新股票分析。</div>')
-
-    # PM decision
-    if decision:
-        rating = decision["rating"]
-        actions_json = decision["account_actions"] or "[]"
-        n_actions = len(_json.loads(actions_json)) if actions_json else 0
-        body.append(f'''
-<h2 style="margin-top:24px;">📋 PM 评级</h2>
-<div class="status" style="border-left:3px solid var(--accent);">
-  <span class="tag tag-{rating.lower()}" style="padding:4px 12px;font-size:14px;">{rating}</span>
-  · 分析日期 {decision["trade_date"]} · {n_actions} 账户级动作 ·
-  <a href="/decisions/{ticker}">查看完整 thesis →</a>
-</div>
-''')
-    else:
-        body.append(f'''
-<h2 style="margin-top:24px;">📋 PM 评级</h2>
-<p style="color:var(--fg-muted);">⏳ 还没分析过 — 用下方按钮触发。</p>
-''')
-
-    # Quick-trigger
-    body.append(f'''
-<h2 style="margin-top:24px;">🚀 触发 PM 分析</h2>
-<form method="post" action="/run" style="display:flex;gap:8px;align-items:flex-start;">
-  <input type="hidden" name="mode" value="tickers">
-  <input type="hidden" name="tickers" value="{ticker}">
-  <input name="instruction" placeholder="可选指令（如：避免 $5K+ 资本利得）"
-         style="flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);">
-  <button type="submit" class="success">🚀 启动</button>
-</form>
-''')
-
-    # Positions table
-    if pos_rows:
-        body.append('<h2 style="margin-top:32px;">📊 跨账户持仓</h2>')
-        body.append('<table><thead><tr><th>账户</th><th>类型</th><th>Broker</th><th>Owner</th><th class="num">股数</th><th class="num">价值</th><th class="num">成本</th><th class="num">P/L%</th></tr></thead><tbody>')
-        for r in pos_rows:
-            c = r["cost_basis_total"] or 0
-            ppct = (r["current_value"] - c) / c * 100 if c else 0
-            pc = "gain" if ppct >= 0 else "loss"
-            body.append(
-                f'<tr><td>{r["account_name"]}</td>'
-                f'<td><span class="tag tag-{r["account_type"].lower()}">{r["account_type"]}</span></td>'
-                f'<td>🏦 {r["broker"] or "—"}</td>'
-                f'<td>👤 {r["owner"] or "—"}</td>'
-                f'<td class="num">{r["quantity"]:.3f}</td>'
-                f'<td class="num">${r["current_value"]:,.0f}</td>'
-                f'<td class="num">${c:,.0f}</td>'
-                f'<td class="num {pc}">{ppct:+.1f}%</td>'
-                f'</tr>'
-            )
-        body.append('</tbody></table>')
-
-    # Executions
-    if executions:
-        body.append('<h2 style="margin-top:32px;">📒 最近交易（最多 10 笔）</h2>')
-        body.append('<table><thead><tr><th>日期</th><th>动作</th><th class="num">股数</th><th class="num">价格</th><th>账户</th><th>备注</th></tr></thead><tbody>')
-        for e in executions:
-            body.append(
-                f'<tr><td>{e["trade_date"]}</td>'
-                f'<td><span class="tag" style="background:var(--{"danger" if e["action"]=="SELL" else "success"});color:white;padding:2px 8px;">{e["action"]}</span></td>'
-                f'<td class="num">{e["shares"]:.3f}</td>'
-                f'<td class="num">${e["price"]:.2f}</td>'
-                f'<td>{e["account_name"]}</td>'
-                f'<td style="font-size:12px;color:var(--fg-muted);">{e["note"] or ""}</td></tr>'
-            )
-        body.append('</tbody></table>')
-
-    # Lots
-    if lots:
-        body.append(f'<h2 style="margin-top:32px;">📦 Cost Basis Lots ({len(lots)})</h2>')
-        body.append('<p style="color:var(--fg-muted);font-size:13px;"><a href="/lots?symbol={ticker}">查看完整 lot 列表 →</a></p>')
-
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{ticker} — 综合视图</title><style>{CSS}
-.tag-buy {{ background: color-mix(in srgb, var(--success) 30%, transparent); color: var(--success); }}
-.tag-overweight {{ background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); }}
-.tag-hold {{ background: var(--border); color: var(--fg-muted); }}
-.tag-underweight {{ background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }}
-.tag-sell {{ background: color-mix(in srgb, var(--danger) 30%, transparent); color: var(--danger); }}
-</style></head><body><div class="container">
-{''.join(body)}
-</div></body></html>"""
+    return templates.TemplateResponse(
+        _dummy_request(), "lookup.html",
+        {
+            "css": CSS, "ticker": ticker, "positions": positions, "totals": totals,
+            "decision": decision, "executions": executions, "lots_count": lots_count,
+        },
+    )
 
 
 @app.get("/lots", response_class=HTMLResponse)
@@ -1600,10 +1540,6 @@ def sectors_view():
 def tickers_view():
     """Canonical ticker registry — single source of truth for prices/metadata."""
     with connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM tickers ORDER BY symbol"
-        ).fetchall()
-        # Count how many positions reference each ticker
         ref_counts = {r["symbol"]: r["c"] for r in conn.execute(
             """
             SELECT symbol, COUNT(*) c FROM positions_snapshot
@@ -1611,49 +1547,19 @@ def tickers_view():
             GROUP BY symbol
             """
         ).fetchall()}
-
-    body = ['<h1>🗂️ Ticker Registry</h1>',
-            '<p class="subtitle">所有股票的权威价格表 + 元数据 — positions_snapshot 引用这里。</p>',
-            '<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>']
-    if not rows:
-        body.append('<p style="color:var(--fg-muted);">还没有 ticker 记录 — 点主页 📡 更新价格 初始化。</p>')
-    else:
-        n_with_meta = sum(1 for r in rows if r["sector"])
-        body.append(f'<div class="status">📊 <strong>{len(rows)}</strong> 个 ticker · 在 <strong>{sum(ref_counts.values())}</strong> 行 positions 中被引用 · <strong>{n_with_meta}</strong> 个有元数据</div>')
-        body.append('<table><thead><tr><th>Ticker</th><th>公司</th><th>Sector</th><th>Industry</th><th class="num">最新价</th><th class="num">市值</th><th class="num">引用</th><th>更新</th></tr></thead><tbody>')
-        for r in rows:
-            n_refs = ref_counts.get(r["symbol"], 0)
-            price = f"${r['last_price']:.2f}" if r["last_price"] else "—"
-            cap = f"${r['market_cap']/1e9:.1f}B" if r["market_cap"] else "—"
-            name = (r["name"] or "")[:32]
-            body.append(
-                f'<tr><td><strong><a href="/lookup?q={r["symbol"]}">{r["symbol"]}</a></strong></td>'
-                f'<td style="font-size:12px;">{name}</td>'
-                f'<td style="font-size:12px;color:var(--fg-muted);">{r["sector"] or "—"}</td>'
-                f'<td style="font-size:12px;color:var(--fg-muted);">{(r["industry"] or "—")[:24]}</td>'
-                f'<td class="num">{price}</td>'
-                f'<td class="num">{cap}</td>'
-                f'<td class="num">{n_refs}</td>'
-                f'<td style="font-size:11px;color:var(--fg-muted);">{(r["last_updated"] or "—")[:10]}</td></tr>'
-            )
-        body.append('</tbody></table>')
-
-    body.append('''
-<details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-top:24px;border:1px solid var(--border);">
-<summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 Normalization 设计</summary>
-<ul style="margin-top:12px;font-size:13px;line-height:1.7;">
-<li><strong>问题</strong>：同一 ticker 在 N 个账户里出现，原本每行都重复存 last_price — 更新要 UPDATE N 次，可能不一致。</li>
-<li><strong>方案</strong>：tickers 表是<strong>权威价格源</strong>（每个 ticker 一行）。positions_snapshot.last_price 保留作 cache。</li>
-<li><strong>更新流</strong>：点 📡 更新价格 → yfinance 批量拉 → UPSERT tickers → SYNC 到 positions_snapshot.last_price。</li>
-<li><strong>未来扩展</strong>：tickers 表可加 sector / market_cap / dividend_yield / target_price 等元数据，所有 ticker 一处维护。</li>
-</ul>
-</details>
-''')
-
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Ticker Registry</title><style>{CSS}</style></head><body><div class="container">
-{''.join(body)}
-</div></body></html>"""
+        rows = [
+            {**dict(r), "n_refs": ref_counts.get(r["symbol"], 0)}
+            for r in conn.execute("SELECT * FROM tickers ORDER BY symbol").fetchall()
+        ]
+    return templates.TemplateResponse(
+        _dummy_request(), "tickers.html",
+        {
+            "css": CSS,
+            "rows": rows,
+            "total_refs": sum(ref_counts.values()),
+            "n_with_meta": sum(1 for r in rows if r["sector"]),
+        },
+    )
 
 
 @app.get("/charts", response_class=HTMLResponse)
@@ -1856,40 +1762,19 @@ def owners_view():
     by_owner: dict[str, list] = {}
     for r in rows:
         by_owner.setdefault(r["owner"] or "Unknown", []).append(r)
-
     grand_total = sum(r["current_value"] for r in rows)
 
-    sections = []
-    sections.append(f'''
-<div class="status">
-  <strong>{len(rows)}</strong> 仓位 · <strong>{len(by_owner)}</strong> owners · 总价值 <strong>${grand_total:,.0f}</strong>
-</div>''')
-
-    # Summary table
-    sections.append('<h2 style="margin-top:24px;">📊 按 owner 汇总</h2>')
-    sections.append('<table><thead><tr><th>Owner</th><th class="num">仓位数</th><th class="num">价值</th><th class="num">占比</th><th class="num">按账户类型分布</th></tr></thead><tbody>')
+    owners: list[dict] = []
     for owner in sorted(by_owner, key=lambda o: -sum(r["current_value"] for r in by_owner[o])):
         items = by_owner[owner]
-        sub = sum(r["current_value"] for r in items)
-        pct = sub / grand_total * 100 if grand_total else 0
+        subtotal = sum(r["current_value"] for r in items)
         type_breakdown: dict[str, float] = {}
         for r in items:
             type_breakdown[r["account_type"]] = type_breakdown.get(r["account_type"], 0) + r["current_value"]
-        tb = " · ".join(f'{t}: ${v/1000:.0f}K' for t, v in sorted(type_breakdown.items(), key=lambda x: -x[1]))
-        sections.append(
-            f'<tr><td><strong>👤 {owner}</strong></td>'
-            f'<td class="num">{len(items)}</td>'
-            f'<td class="num">${sub:,.0f}</td>'
-            f'<td class="num">{pct:.1f}%</td>'
-            f'<td style="font-size:12px;color:var(--fg-muted);">{tb}</td></tr>'
+        tb = " · ".join(
+            f"{t}: ${v/1000:.0f}K"
+            for t, v in sorted(type_breakdown.items(), key=lambda x: -x[1])
         )
-    sections.append('</tbody></table>')
-
-    # Per-owner top holdings
-    for owner in sorted(by_owner, key=lambda o: -sum(r["current_value"] for r in by_owner[o])):
-        items = by_owner[owner]
-        sub = sum(r["current_value"] for r in items)
-        # Aggregate by symbol within owner
         by_sym: dict[str, dict] = {}
         for r in items:
             s = by_sym.setdefault(r["symbol"], {"value": 0, "cost": 0, "shares": 0, "accounts": 0})
@@ -1897,33 +1782,28 @@ def owners_view():
             s["cost"] += r["cost_basis_total"] or 0
             s["shares"] += r["quantity"]
             s["accounts"] += 1
-        top = sorted(by_sym.items(), key=lambda kv: -kv[1]["value"])[:10]
-
-        sections.append(f'<h2 style="margin-top:32px;">👤 {owner} — top 10 ({len(by_sym)} unique tickers, ${sub:,.0f})</h2>')
-        sections.append('<table><thead><tr><th>Ticker</th><th class="num">合计股数</th><th class="num">价值</th><th class="num">成本</th><th class="num">P/L%</th><th class="num">账户数</th></tr></thead><tbody>')
-        for sym, d in top:
+        top = []
+        for sym, d in sorted(by_sym.items(), key=lambda kv: -kv[1]["value"])[:10]:
             pl_pct = ((d["value"] - d["cost"]) / d["cost"] * 100) if d["cost"] else 0
-            pl_class = "gain" if pl_pct >= 0 else "loss"
-            sections.append(
-                f'<tr><td><strong>{sym}</strong></td>'
-                f'<td class="num">{d["shares"]:.3f}</td>'
-                f'<td class="num">${d["value"]:,.0f}</td>'
-                f'<td class="num">${d["cost"]:,.0f}</td>'
-                f'<td class="num {pl_class}">{pl_pct:+.1f}%</td>'
-                f'<td class="num">{d["accounts"]}</td></tr>'
-            )
-        sections.append('</tbody></table>')
+            top.append({
+                "symbol": sym, "shares": d["shares"], "value": d["value"],
+                "cost": d["cost"], "pl_pct": pl_pct,
+                "pl_class": "gain" if pl_pct >= 0 else "loss",
+                "accounts": d["accounts"],
+            })
+        owners.append({
+            "owner": owner, "n_positions": len(items), "subtotal": subtotal,
+            "pct": subtotal / grand_total * 100 if grand_total else 0,
+            "type_breakdown": tb, "n_unique": len(by_sym), "top": top,
+        })
 
-    body = f'''
-<h1>👥 按 Owner 看持仓</h1>
-<p class="subtitle">按 Self / Spouse / Joint / 子女 分组聚合</p>
-<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 回到持仓</a></div>
-{"".join(sections)}
-'''
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Owner 视图</title><style>{CSS}</style></head><body><div class="container">
-{body}
-</div></body></html>"""
+    return templates.TemplateResponse(
+        _dummy_request(), "owners.html",
+        {
+            "css": CSS, "owners": owners,
+            "n_positions": len(rows), "grand_total": grand_total,
+        },
+    )
 
 
 @app.get("/decisions", response_class=HTMLResponse)
@@ -2066,41 +1946,13 @@ table {{ background: var(--bg-subtle); border-radius: 6px; }}
 @app.get("/executions", response_class=HTMLResponse)
 def executions_view():
     with connect() as conn:
-        rows = conn.execute(
+        rows = [dict(r) for r in conn.execute(
             "SELECT * FROM executions ORDER BY trade_date DESC, execution_id DESC LIMIT 100"
-        ).fetchall()
-
-    body = ['<h1>📒 交易记录</h1>',
-            f'<p class="subtitle">{len(rows)} 笔最近交易</p>',
-            '<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a> <a class="btn secondary" href="/decisions">PM 分析</a></div>']
-
-    if not rows:
-        body.append('<p style="color:var(--fg-muted);">还没记录任何交易 — 用持仓页的 Sell 按钮记录</p>')
-    else:
-        body.append('<table style="background:var(--bg-subtle);border-radius:8px;border:1px solid var(--border);">')
-        body.append('<thead><tr><th>日期</th><th>Ticker</th><th>动作</th><th class="num">股数</th><th class="num">价格</th><th class="num">总额</th><th>账户</th><th>备注</th></tr></thead><tbody>')
-        for r in rows:
-            total = r["shares"] * r["price"]
-            sign = "-" if r["action"] == "SELL" else "+"
-            cls = "loss" if r["action"] == "SELL" else "gain"
-            body.append(
-                f'<tr>'
-                f'<td>{r["trade_date"]}</td>'
-                f'<td><strong>{r["symbol"]}</strong></td>'
-                f'<td><span class="tag" style="background:var(--{"danger" if r["action"]=="SELL" else "success"});color:white;padding:2px 8px;">{r["action"]}</span></td>'
-                f'<td class="num">{r["shares"]:.3f}</td>'
-                f'<td class="num">${r["price"]:.2f}</td>'
-                f'<td class="num {cls}">{sign}${total:,.0f}</td>'
-                f'<td>{r["account_name"]}</td>'
-                f'<td style="font-size:12px;color:var(--fg-muted);">{r["note"] or ""}</td>'
-                f'</tr>'
-            )
-        body.append('</tbody></table>')
-
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>交易记录</title><style>{CSS}</style></head><body><div class="container">
-{''.join(body)}
-</div></body></html>"""
+        ).fetchall()]
+    return templates.TemplateResponse(
+        _dummy_request(), "executions.html",
+        {"css": CSS, "rows": rows},
+    )
 
 
 @app.post("/run", response_class=HTMLResponse)

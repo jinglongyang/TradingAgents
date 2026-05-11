@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Ticker Registry{% endblock %}
+
+{% block content %}
+  <h1>🗂️ Ticker Registry</h1>
+  <p class="subtitle">所有股票的权威价格表 + 元数据 — positions_snapshot 引用这里。</p>
+  <div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>
+
+  {% if not rows %}
+    <p style="color:var(--fg-muted);">还没有 ticker 记录 — 点主页 📡 更新价格 初始化。</p>
+  {% else %}
+    <div class="status">
+      📊 <strong>{{ rows|length }}</strong> 个 ticker ·
+      在 <strong>{{ total_refs }}</strong> 行 positions 中被引用 ·
+      <strong>{{ n_with_meta }}</strong> 个有元数据
+    </div>
+    <table>
+      <thead><tr>
+        <th>Ticker</th><th>公司</th><th>Sector</th><th>Industry</th>
+        <th class="num">最新价</th><th class="num">市值</th>
+        <th class="num">引用</th><th>更新</th>
+      </tr></thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td><strong><a href="/lookup?q={{ r.symbol }}">{{ r.symbol }}</a></strong></td>
+          <td style="font-size:12px;">{{ (r.name or "")[:32] }}</td>
+          <td style="font-size:12px;color:var(--fg-muted);">{{ r.sector or "—" }}</td>
+          <td style="font-size:12px;color:var(--fg-muted);">{{ (r.industry or "—")[:24] }}</td>
+          <td class="num">{% if r.last_price %}${{ "%.2f"|format(r.last_price) }}{% else %}—{% endif %}</td>
+          <td class="num">{% if r.market_cap %}${{ "%.1f"|format(r.market_cap / 1e9) }}B{% else %}—{% endif %}</td>
+          <td class="num">{{ r.n_refs }}</td>
+          <td style="font-size:11px;color:var(--fg-muted);">{{ (r.last_updated or "—")[:10] }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+
+  <details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-top:24px;border:1px solid var(--border);">
+    <summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 Normalization 设计</summary>
+    <ul style="margin-top:12px;font-size:13px;line-height:1.7;">
+      <li><strong>问题</strong>：同一 ticker 在 N 个账户里出现，原本每行都重复存 last_price — 更新要 UPDATE N 次，可能不一致。</li>
+      <li><strong>方案</strong>：tickers 表是<strong>权威价格源</strong>（每个 ticker 一行）。positions_snapshot.last_price 保留作 cache。</li>
+      <li><strong>更新流</strong>：点 📡 更新价格 → yfinance 批量拉 → UPSERT tickers → SYNC 到 positions_snapshot.last_price。</li>
+      <li><strong>未来扩展</strong>：tickers 表可加 sector / market_cap / dividend_yield / target_price 等元数据，所有 ticker 一处维护。</li>
+    </ul>
+  </details>
+{% endblock %}

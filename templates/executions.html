@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}交易记录{% endblock %}
+
+{% block content %}
+  <h1>📒 交易记录</h1>
+  <p class="subtitle">{{ rows|length }} 笔最近交易</p>
+  <div style="margin-bottom:16px;">
+    <a class="btn secondary" href="/">← 持仓</a>
+    <a class="btn secondary" href="/decisions">PM 分析</a>
+  </div>
+
+  {% if not rows %}
+    <p style="color:var(--fg-muted);">还没记录任何交易 — 用持仓页的 Sell 按钮记录</p>
+  {% else %}
+    <table style="background:var(--bg-subtle);border-radius:8px;border:1px solid var(--border);">
+      <thead>
+        <tr>
+          <th>日期</th><th>Ticker</th><th>动作</th>
+          <th class="num">股数</th><th class="num">价格</th><th class="num">总额</th>
+          <th>账户</th><th>备注</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td>{{ r.trade_date }}</td>
+          <td><strong>{{ r.symbol }}</strong></td>
+          <td>
+            <span class="tag"
+                  style="background:var(--{{ 'danger' if r.action == 'SELL' else 'success' }});color:white;padding:2px 8px;">
+              {{ r.action }}
+            </span>
+          </td>
+          <td class="num">{{ "%.3f"|format(r.shares) }}</td>
+          <td class="num">${{ "%.2f"|format(r.price) }}</td>
+          <td class="num {{ 'loss' if r.action == 'SELL' else 'gain' }}">
+            {{ '-' if r.action == 'SELL' else '+' }}${{ "{:,.0f}".format(r.shares * r.price) }}
+          </td>
+          <td>{{ r.account_name }}</td>
+          <td style="font-size:12px;color:var(--fg-muted);">{{ r.note or "" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+{% endblock %}
