@@ -14,6 +14,7 @@ All data stays on localhost. The DB is ~/.tradingagents/portfolio.db.
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from typing import Optional
 
@@ -127,6 +128,10 @@ function openAddToAccount(acctId, acctName, broker, accType, owner) {
     document.querySelector('#add-modal input[name="owner"]').value = owner || 'Self';
     document.querySelector('#add-modal select[name="account_type"]').value = accType || 'Taxable';
     document.querySelector('#add-modal select[name="broker"]').value = broker || 'Fidelity';
+    // Tell the backend to redirect back to this account's anchor after add
+    let anchor = 'acct-' + acctId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    let inp = document.querySelector('#add-modal input[name="redirect_anchor"]');
+    if (inp) inp.value = anchor;
     document.querySelector('#add-modal input[name="symbol"]').focus();
     openModal('add-modal');
 }
@@ -190,6 +195,7 @@ def _build_holdings_view():
               onclick="openAddToAccount('{aid}', `{aname}`, '{broker}', '{atype}', '{owner}')">➕ 加 ticker</button>
     </div>
   </div>
+  <div id="acct-{re.sub(r"[^a-zA-Z0-9_-]", "_", aid)}" style="scroll-margin-top:80px;"></div>
   <table>
     <thead><tr><th>Ticker</th><th class="num">持股</th><th class="num">价格</th><th class="num">价值</th><th class="num">成本</th><th class="num">P/L%</th><th></th></tr></thead>
     <tbody>''')
@@ -271,6 +277,7 @@ def _render(message: str = ""):
   <div class="modal">
     <h3>添加新持仓</h3>
     <form method="post" action="/add">
+      <input type="hidden" name="redirect_anchor" value="">
       <div class="row">
         <div class="field"><label>账户 ID <span class="hint">如 RH-IND</span></label><input name="account_id" required></div>
         <div class="field"><label>账户名</label><input name="account_name" required></div>
@@ -489,7 +496,7 @@ def index():
     return _render()
 
 
-@app.post("/add", response_class=HTMLResponse)
+@app.post("/add")
 def add(
     account_id: str = Form(...),
     account_name: str = Form(...),
@@ -500,6 +507,7 @@ def add(
     quantity: float = Form(...),
     last_price: Optional[float] = Form(None),
     cost_basis_total: Optional[float] = Form(None),
+    redirect_anchor: str = Form(""),
 ):
     try:
         snap_id = add_position(
@@ -515,6 +523,9 @@ def add(
                 "UPDATE positions_snapshot SET owner = ? WHERE account_id = ? AND owner IS NULL",
                 (owner.strip(), account_id.strip()),
             )
+        # PRG pattern: redirect to anchor so browser scrolls back to that account section
+        if redirect_anchor:
+            return RedirectResponse(url=f"/#{redirect_anchor}", status_code=303)
         msg = f'<div class="msg success">✓ 已添加 <strong>{symbol.upper()}</strong> 到 {account_name}</div>'
     except Exception as e:  # noqa: BLE001
         msg = f'<div class="msg error">✗ 错误: {e}</div>'
