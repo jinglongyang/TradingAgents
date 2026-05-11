@@ -13,6 +13,7 @@ from tradingagents.portfolio_db.db import (
 )
 from tradingagents.portfolio_db.snapshots import (
     add_position,
+    carry_forward_snapshot,
     import_csv_snapshot,
     import_manual_snapshot,
     latest_snapshot_date,
@@ -30,6 +31,7 @@ __all__ = [
     "connect",
     "init_db",
     "add_position",
+    "carry_forward_snapshot",
     "import_csv_snapshot",
     "import_manual_snapshot",
     "latest_snapshot_date",

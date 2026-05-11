@@ -403,11 +403,13 @@ def add(
     quantity: float = Form(...),
     last_price: Optional[float] = Form(None),
     cost_basis_total: Optional[float] = Form(None),
+    backfill: Optional[str] = Form(None),
     redirect_anchor: str = Form(""),
 ):
     try:
         symbol_clean = symbol.strip().upper()
         price = last_price or 0.0
+        is_backfill = bool(backfill) and backfill not in ("0", "false", "no", "")
 
         # Auto-fetch current price from yfinance if not provided
         if price <= 0:
@@ -444,6 +446,25 @@ def add(
             conn.execute(
                 "UPDATE positions_snapshot SET owner = ? WHERE account_id = ? AND owner IS NULL",
                 (owner.strip(), account_id.strip()),
+            )
+
+        # Record as a BUY execution unless the user marked this as a backfill
+        # (e.g. importing pre-existing positions from a non-Fidelity broker).
+        # When price is unknown we fall back to avg-cost so the execution
+        # carries a meaningful number even for cost-basis-only entries.
+        if not is_backfill and quantity > 0:
+            exec_price = price if price > 0 else (
+                (cost_basis_total or 0.0) / quantity if quantity else 0.0
+            )
+            record_execution(
+                trade_date=date.today().isoformat(),
+                account_id=account_id.strip(),
+                account_name=account_name.strip(),
+                symbol=symbol_clean,
+                action="BUY",
+                shares=quantity,
+                price=exec_price,
+                note="via /add",
             )
         # Always derive anchor from account_id (ignore any stale redirect_anchor
         # from a recycled modal — JS reuses one form element across accounts).

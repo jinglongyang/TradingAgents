@@ -137,6 +137,55 @@ def _write_positions(
     return {"files": files_read, "inserted": inserted, "updated": updated}
 
 
+def carry_forward_snapshot(
+    target_date: str,
+    db_path: Path | None = None,
+) -> int:
+    """Copy the most recent snapshot prior to ``target_date`` into ``target_date``.
+
+    A snapshot is a *full* picture of holdings on that import_date. When the
+    user adds a single position via the UI on a fresh day, that day would
+    otherwise contain just one row and shadow the prior day's complete picture
+    in ``MAX(import_date)`` lookups. Carrying forward makes the new day a true
+    superset before the new position is inserted.
+
+    No-op if ``target_date`` already has rows or no prior snapshot exists.
+    Returns the number of rows copied.
+    """
+    with connect(db_path) as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM positions_snapshot WHERE import_date = ? LIMIT 1",
+            (target_date,),
+        ).fetchone()
+        if existing:
+            return 0
+
+        prior = conn.execute(
+            "SELECT MAX(import_date) AS d FROM positions_snapshot WHERE import_date < ?",
+            (target_date,),
+        ).fetchone()
+        prior_date = prior["d"] if prior else None
+        if not prior_date:
+            return 0
+
+        cur = conn.execute(
+            """
+            INSERT INTO positions_snapshot (
+                import_date, statement_date, account_id, account_name, account_type,
+                symbol, quantity, last_price, current_value, cost_basis_total, avg_cost,
+                broker
+            )
+            SELECT ?, statement_date, account_id, account_name, account_type,
+                   symbol, quantity, last_price, current_value, cost_basis_total, avg_cost,
+                   broker
+            FROM positions_snapshot
+            WHERE import_date = ?
+            """,
+            (target_date, prior_date),
+        )
+        return cur.rowcount or 0
+
+
 def add_position(
     account_id: str,
     account_name: str,
@@ -151,6 +200,7 @@ def add_position(
 ) -> int:
     """Insert (or replace) a single manually-entered position. Returns rowid."""
     import_date = import_date or date.today().isoformat()
+    carry_forward_snapshot(import_date, db_path)
     if account_type:
         try:
             atype = AccountType(account_type)
