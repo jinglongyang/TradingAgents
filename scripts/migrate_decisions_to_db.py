@@ -64,15 +64,20 @@ def main() -> int:
 
     init_db()
     root = Path("outputs")
-    dirs = sorted(root.glob("portfolio_analysis_*/"))
-    print(f"Found {len(dirs)} analysis dirs")
+    portfolio_dirs = sorted(root.glob("portfolio_analysis_*/"))
+    new_ticker_dirs = sorted(root.glob("new_ticker_*/"))
+    print(f"Found {len(portfolio_dirs)} portfolio dirs, {len(new_ticker_dirs)} new-ticker dirs")
 
-    # For each ticker, keep only the most recent dir (sorted lexically =
-    # chronologically since dirs are timestamped YYYY-MM-DD_HHMMSS).
+    # For each ticker, keep only the most recent run (lexical sort = chronological
+    # since dirs end with YYYY-MM-DD_HHMMSS). Portfolio runs put JSONs under
+    # per_ticker/; new_ticker runs put a single TICKER.json at the dir root.
     ticker_to_latest: dict[str, Path] = {}
-    for d in dirs:
+    for d in portfolio_dirs:
         for jf in (d / "per_ticker").glob("*.json"):
             ticker_to_latest[jf.stem] = jf  # later wins
+    for d in new_ticker_dirs:
+        for jf in d.glob("*.json"):
+            ticker_to_latest[jf.stem] = jf  # later wins (across both dir kinds)
 
     print(f"Migrating {len(ticker_to_latest)} unique tickers (latest run per ticker)")
 
