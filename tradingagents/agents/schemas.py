@@ -311,7 +311,10 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
     if decision.time_horizon:
         parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
     if decision.account_actions:
-        parts.extend(["", "**Per-Account Actions**:"])
+        # Blank line after the header is required so python-markdown
+        # parses the following ``- ...`` lines as a real <ul>, instead of
+        # collapsing the whole block into a single <p>.
+        parts.extend(["", "**Per-Account Actions**:", ""])
         for item in decision.account_actions:
             size = f" ({item.size_pct:.0f}% of current)" if item.size_pct is not None else ""
             parts.append(

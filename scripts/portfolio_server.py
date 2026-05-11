@@ -1716,7 +1716,15 @@ def decision_detail(ticker: str):
             back_url="/decisions", back_label="回到评级列表",
         )
 
-    decision_html = _md.markdown(row["final_decision"], extensions=["tables", "fenced_code"])
+    # Older decisions saved before schemas.py inserted a blank line after the
+    # "Per-Account Actions" header — without it, python-markdown collapses the
+    # bullet block into a single <p>. Insert it on render for backwards compat.
+    raw_md = re.sub(
+        r"(\*\*Per-Account Actions\*\*:)\n(-)",
+        r"\1\n\n\2",
+        row["final_decision"],
+    )
+    decision_html = _md.markdown(raw_md, extensions=["tables", "fenced_code"])
     return templates.TemplateResponse(
         _dummy_request(), "decision_detail.html",
         {
