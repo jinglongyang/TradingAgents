@@ -17,6 +17,7 @@ from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
     get_language_instruction,
 )
+from tradingagents.dataflows.macro import get_macro_context
 from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
@@ -40,6 +41,9 @@ def create_portfolio_manager(llm):
             if past_context
             else ""
         )
+
+        macro_block = get_macro_context()
+        macro_line = f"\n{macro_block}\n" if macro_block else ""
 
         holdings_context = state.get("holdings_context", "")
         user_tax_context = os.environ.get("USER_TAX_CONTEXT", "").strip()
@@ -113,7 +117,7 @@ words used to describe risks.
 **Context:**
 - Research Manager's investment plan: **{research_plan}**
 - Trader's transaction proposal: **{trader_plan}**
-{lessons_line}
+{lessons_line}{macro_line}
 **Risk Analysts Debate History:**
 {history}
 {holdings_block}

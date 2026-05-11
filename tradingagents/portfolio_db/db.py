@@ -59,9 +59,10 @@ CREATE TABLE IF NOT EXISTS decisions (
     holding_days     INTEGER,
     reflection       TEXT,                     -- 2-4 sentences from Reflector
     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE (trade_date, symbol)
+    UNIQUE (trade_date, symbol, decision_id)
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_symbol ON decisions (symbol);
+CREATE INDEX IF NOT EXISTS idx_decisions_trade_date ON decisions (trade_date);
 
 -- Manually recorded executions — what the user actually traded after
 -- seeing PM's advice. decision_id is optional (some trades aren't

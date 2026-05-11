@@ -216,6 +216,13 @@ def _render(message: str = ""):
   <h1>📊 持仓管理</h1>
   <p class="subtitle">本地浏览器界面 · 数据存在 ~/.tradingagents/portfolio.db · 任何时候关掉浏览器都不会丢数据</p>
 
+  <form method="get" action="/lookup" style="margin-bottom:20px;display:flex;gap:8px;">
+    <input name="q" placeholder="🔍 输入 ticker (如 NVDA, CRWV, IREN) 查看持仓 + PM 评级 + 一键触发分析"
+           style="flex:1;padding:10px 14px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:14px;"
+           autofocus required style="text-transform:uppercase">
+    <button type="submit">查询</button>
+  </form>
+
   <div class="status">
     最新 snapshot: <strong>{latest}</strong> · {n_rows} 仓位 · 总价值 <strong>${total_val:,.0f}</strong> · 今天: {today}
   </div>
@@ -232,6 +239,7 @@ def _render(message: str = ""):
     <a class="btn secondary" href="/wash-sale">🚫 Wash Sale</a>
     <a class="btn secondary" href="/lots">📦 Cost Basis Lots</a>
     <a class="btn secondary" href="/decisions">📋 PM 分析</a>
+    <a class="btn secondary" href="/thesis-evolution">📈 Thesis 演变</a>
     <a class="btn secondary" href="/runs">🏃 运行历史</a>
     <a class="btn secondary" href="/executions">📒 交易记录</a>
     <a class="btn secondary" href="/api/positions" target="_blank">View JSON</a>
@@ -595,6 +603,145 @@ def sell(
     except Exception as e:  # noqa: BLE001
         msg = f'<div class="msg error">✗ 错误: {e}</div>'
     return _render(message=msg)
+
+
+@app.get("/lookup", response_class=HTMLResponse)
+def lookup_view(q: str):
+    """Unified ticker view: positions across all accounts + latest PM decision."""
+    import json as _json
+    ticker = q.strip().upper()
+    if not ticker:
+        return RedirectResponse(url="/", status_code=303)
+
+    latest = latest_snapshot_date()
+    with connect() as conn:
+        pos_rows = conn.execute(
+            """
+            SELECT * FROM positions_snapshot
+            WHERE symbol = ? AND import_date = ?
+            ORDER BY current_value DESC
+            """,
+            (ticker, latest) if latest else (ticker, date.today().isoformat()),
+        ).fetchall()
+        decision = conn.execute(
+            "SELECT * FROM decisions WHERE symbol = ? ORDER BY trade_date DESC LIMIT 1",
+            (ticker,),
+        ).fetchone()
+        executions = conn.execute(
+            "SELECT * FROM executions WHERE symbol = ? ORDER BY trade_date DESC LIMIT 10",
+            (ticker,),
+        ).fetchall()
+        lots = conn.execute(
+            "SELECT * FROM cost_basis_lots WHERE symbol = ? ORDER BY purchase_date DESC",
+            (ticker,),
+        ).fetchall()
+
+    total_value = sum(r["current_value"] for r in pos_rows) if pos_rows else 0
+    total_cost = sum(r["cost_basis_total"] or 0 for r in pos_rows) if pos_rows else 0
+    total_shares = sum(r["quantity"] for r in pos_rows) if pos_rows else 0
+    pl = total_value - total_cost if total_cost else 0
+    pl_pct = pl / total_cost * 100 if total_cost else 0
+
+    body = [f'<h1>🔍 {ticker}</h1>']
+    body.append('<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>')
+
+    # Header summary
+    if pos_rows:
+        pl_class = "gain" if pl >= 0 else "loss"
+        body.append(f'''
+<div class="status" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px;">
+  <div><div style="color:var(--fg-muted);font-size:12px;">总价值</div><strong style="font-size:18px;">${total_value:,.0f}</strong></div>
+  <div><div style="color:var(--fg-muted);font-size:12px;">总成本</div><strong style="font-size:18px;">${total_cost:,.0f}</strong></div>
+  <div><div style="color:var(--fg-muted);font-size:12px;">P/L</div><strong class="{pl_class}" style="font-size:18px;">{pl_pct:+.1f}% (${pl:+,.0f})</strong></div>
+  <div><div style="color:var(--fg-muted);font-size:12px;">合计股数</div><strong style="font-size:18px;">{total_shares:,.3f}</strong></div>
+  <div><div style="color:var(--fg-muted);font-size:12px;">账户数</div><strong style="font-size:18px;">{len(pos_rows)}</strong></div>
+</div>
+''')
+    else:
+        body.append('<div class="msg">⚠️ <strong>未持仓</strong> — 这是探索性查询。可以触发新股票分析。</div>')
+
+    # PM decision
+    if decision:
+        rating = decision["rating"]
+        actions_json = decision["account_actions"] or "[]"
+        n_actions = len(_json.loads(actions_json)) if actions_json else 0
+        body.append(f'''
+<h2 style="margin-top:24px;">📋 PM 评级</h2>
+<div class="status" style="border-left:3px solid var(--accent);">
+  <span class="tag tag-{rating.lower()}" style="padding:4px 12px;font-size:14px;">{rating}</span>
+  · 分析日期 {decision["trade_date"]} · {n_actions} 账户级动作 ·
+  <a href="/decisions/{ticker}">查看完整 thesis →</a>
+</div>
+''')
+    else:
+        body.append(f'''
+<h2 style="margin-top:24px;">📋 PM 评级</h2>
+<p style="color:var(--fg-muted);">⏳ 还没分析过 — 用下方按钮触发。</p>
+''')
+
+    # Quick-trigger
+    body.append(f'''
+<h2 style="margin-top:24px;">🚀 触发 PM 分析</h2>
+<form method="post" action="/run" style="display:flex;gap:8px;align-items:flex-start;">
+  <input type="hidden" name="mode" value="tickers">
+  <input type="hidden" name="tickers" value="{ticker}">
+  <input name="instruction" placeholder="可选指令（如：避免 $5K+ 资本利得）"
+         style="flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);">
+  <button type="submit" class="success">🚀 启动</button>
+</form>
+''')
+
+    # Positions table
+    if pos_rows:
+        body.append('<h2 style="margin-top:32px;">📊 跨账户持仓</h2>')
+        body.append('<table><thead><tr><th>账户</th><th>类型</th><th>Broker</th><th>Owner</th><th class="num">股数</th><th class="num">价值</th><th class="num">成本</th><th class="num">P/L%</th></tr></thead><tbody>')
+        for r in pos_rows:
+            c = r["cost_basis_total"] or 0
+            ppct = (r["current_value"] - c) / c * 100 if c else 0
+            pc = "gain" if ppct >= 0 else "loss"
+            body.append(
+                f'<tr><td>{r["account_name"]}</td>'
+                f'<td><span class="tag tag-{r["account_type"].lower()}">{r["account_type"]}</span></td>'
+                f'<td>🏦 {r["broker"] or "—"}</td>'
+                f'<td>👤 {r["owner"] or "—"}</td>'
+                f'<td class="num">{r["quantity"]:.3f}</td>'
+                f'<td class="num">${r["current_value"]:,.0f}</td>'
+                f'<td class="num">${c:,.0f}</td>'
+                f'<td class="num {pc}">{ppct:+.1f}%</td>'
+                f'</tr>'
+            )
+        body.append('</tbody></table>')
+
+    # Executions
+    if executions:
+        body.append('<h2 style="margin-top:32px;">📒 最近交易（最多 10 笔）</h2>')
+        body.append('<table><thead><tr><th>日期</th><th>动作</th><th class="num">股数</th><th class="num">价格</th><th>账户</th><th>备注</th></tr></thead><tbody>')
+        for e in executions:
+            body.append(
+                f'<tr><td>{e["trade_date"]}</td>'
+                f'<td><span class="tag" style="background:var(--{"danger" if e["action"]=="SELL" else "success"});color:white;padding:2px 8px;">{e["action"]}</span></td>'
+                f'<td class="num">{e["shares"]:.3f}</td>'
+                f'<td class="num">${e["price"]:.2f}</td>'
+                f'<td>{e["account_name"]}</td>'
+                f'<td style="font-size:12px;color:var(--fg-muted);">{e["note"] or ""}</td></tr>'
+            )
+        body.append('</tbody></table>')
+
+    # Lots
+    if lots:
+        body.append(f'<h2 style="margin-top:32px;">📦 Cost Basis Lots ({len(lots)})</h2>')
+        body.append('<p style="color:var(--fg-muted);font-size:13px;"><a href="/lots?symbol={ticker}">查看完整 lot 列表 →</a></p>')
+
+    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{ticker} — 综合视图</title><style>{CSS}
+.tag-buy {{ background: color-mix(in srgb, var(--success) 30%, transparent); color: var(--success); }}
+.tag-overweight {{ background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); }}
+.tag-hold {{ background: var(--border); color: var(--fg-muted); }}
+.tag-underweight {{ background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }}
+.tag-sell {{ background: color-mix(in srgb, var(--danger) 30%, transparent); color: var(--danger); }}
+</style></head><body><div class="container">
+{''.join(body)}
+</div></body></html>"""
 
 
 @app.get("/lots", response_class=HTMLResponse)
@@ -1104,6 +1251,88 @@ def drift_view():
 
     return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Drift Alert</title><style>{CSS}
+.tag-buy {{ background: color-mix(in srgb, var(--success) 30%, transparent); color: var(--success); }}
+.tag-overweight {{ background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); }}
+.tag-hold {{ background: var(--border); color: var(--fg-muted); }}
+.tag-underweight {{ background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }}
+.tag-sell {{ background: color-mix(in srgb, var(--danger) 30%, transparent); color: var(--danger); }}
+</style></head><body><div class="container">
+{''.join(body)}
+</div></body></html>"""
+
+
+@app.get("/thesis-evolution", response_class=HTMLResponse)
+def thesis_evolution_view():
+    """Per-ticker history of PM ratings over time — see if judgment was stable."""
+    import re as _re
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT symbol, trade_date, rating, final_decision FROM decisions ORDER BY symbol, trade_date"
+        ).fetchall()
+
+    by_symbol: dict[str, list] = {}
+    for r in rows:
+        by_symbol.setdefault(r["symbol"], []).append(r)
+
+    # Only show tickers with 2+ data points (otherwise no evolution to see)
+    evolving = {s: rs for s, rs in by_symbol.items() if len(rs) >= 2}
+    stable = {s: rs for s, rs in by_symbol.items() if len(rs) == 1}
+
+    body = [
+        '<h1>📈 Thesis 演变跟踪</h1>',
+        '<p class="subtitle">同 ticker 跨多次分析的评级变化 — 看 PM 自己判断稳定性</p>',
+        '<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>',
+    ]
+
+    body.append(f'<div class="status">📊 {len(by_symbol)} 个 ticker · <strong>{len(evolving)}</strong> 个有多次分析 · <strong>{len(stable)}</strong> 个仅 1 次</div>')
+
+    pt_re = _re.compile(r"Price Target.*?\$?([\d.]+)")
+    if evolving:
+        body.append('<h2 style="margin-top:24px;">🔄 评级演变（≥ 2 次分析）</h2>')
+        body.append('<table><thead><tr><th>Ticker</th><th>评级序列（旧→新）</th><th>PT 序列</th><th>稳定性</th></tr></thead><tbody>')
+        for sym in sorted(evolving):
+            seq = evolving[sym]
+            rating_seq = [r["rating"] for r in seq]
+            pt_seq = []
+            for r in seq:
+                m = pt_re.search(r["final_decision"] or "")
+                pt_seq.append(f"${m.group(1)}" if m else "—")
+
+            rating_html = " → ".join(
+                f'<span class="tag tag-{rt.lower()}" style="padding:2px 8px;font-size:11px;">{rt}</span>'
+                for rt in rating_seq
+            )
+            n_unique = len(set(rating_seq))
+            if n_unique == 1:
+                stability = '✅ 完全一致'
+            elif n_unique == 2:
+                stability = '🟡 轻微变化'
+            else:
+                stability = '⚠️ 明显分歧'
+            body.append(
+                f'<tr><td><strong><a href="/decisions/{sym}">{sym}</a></strong></td>'
+                f'<td>{rating_html}</td>'
+                f'<td style="font-size:12px;">{" → ".join(pt_seq)}</td>'
+                f'<td>{stability}</td></tr>'
+            )
+        body.append('</tbody></table>')
+    else:
+        body.append('<p style="color:var(--fg-muted);">还没有 ticker 被多次分析过。每次重跑分析后这里会自动出现演变。</p>')
+
+    body.append('''
+<details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-top:24px;border:1px solid var(--border);">
+<summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 为什么 thesis 演变重要</summary>
+<ul style="margin-top:12px;font-size:13px;line-height:1.7;">
+<li><strong>判断稳定性</strong>：同 ticker 跨多次分析的评级应该相对稳定 — 大幅翻转（Buy → Sell）需要新事件来 justify。</li>
+<li><strong>检测 model drift</strong>：如果 PM 在没有新事实的情况下改变立场，可能是 LLM 抽奖性而非真判断。</li>
+<li><strong>历史成本基础</strong>：未来 6-12 个月，你能看到"我 5 月给 NVDA Overweight，10 月还是 Overweight，2027 年 1 月变 Hold" — 这种演变本身是有意义的信号。</li>
+<li><strong>学习数据</strong>：评级变化 + 实际 alpha = PM 的真实命中率（详见 /runs 反向验证）</li>
+</ul>
+</details>
+''')
+
+    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Thesis 演变</title><style>{CSS}
 .tag-buy {{ background: color-mix(in srgb, var(--success) 30%, transparent); color: var(--success); }}
 .tag-overweight {{ background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); }}
 .tag-hold {{ background: var(--border); color: var(--fg-muted); }}
