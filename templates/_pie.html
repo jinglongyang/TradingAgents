@@ -1,0 +1,22 @@
+{# Pie chart partial. Caller passes `pie` dict with: title, svg (str), legend (list of {label, value, pct, color}). #}
+<div style="background:var(--bg-subtle);border-radius:8px;padding:20px;border:1px solid var(--border);margin-bottom:20px;">
+  <h3 style="margin-top:0;font-size:15px;">{{ pie.title }}</h3>
+  <div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap;">
+    <svg width="{{ pie.size }}" height="{{ pie.size }}" viewBox="0 0 {{ pie.size }} {{ pie.size }}" style="flex-shrink:0;">
+      {{ pie.arcs|safe }}
+    </svg>
+    <div style="flex:1;min-width:200px;">
+      <div style="display:flex;flex-direction:column;gap:4px;font-size:12px;">
+        {% for item in pie.legend %}
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span style="display:inline-block;width:14px;height:14px;background:{{ item.color }};border-radius:3px;"></span>
+          <span style="flex:1;">{{ item.label }}</span>
+          <span style="font-variant-numeric:tabular-nums;color:var(--fg-muted);">
+            ${{ "%.0f"|format(item.value / 1000) }}K · {{ "%.1f"|format(item.pct) }}%
+          </span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</div>

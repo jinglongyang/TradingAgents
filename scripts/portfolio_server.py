@@ -930,7 +930,7 @@ def correlation_view():
 
     tickers = [r["symbol"] for r in rows]
     if len(tickers) < 2:
-        return HTMLResponse(f"<p>至少需要 2 个持仓</p><a href='/'>← Back</a>")
+        return _error_page("至少需要 2 个持仓才能计算相关性")
 
     try:
         data = yf.download(tickers, period="90d", progress=False, auto_adjust=True)["Close"]
@@ -940,7 +940,7 @@ def correlation_view():
         returns = data.pct_change().dropna()
         corr = returns.corr()
     except Exception as e:
-        return HTMLResponse(f"<p>yfinance 错误: {e}</p><a href='/'>← Back</a>")
+        return _error_page(f"yfinance 拉数据失败: <code>{e}</code>")
 
     # Reorder by total value (already sorted by SQL)
     valid = [t for t in tickers if t in corr.columns]
@@ -1127,7 +1127,7 @@ def drift_view():
 
 
 @app.get("/performance", response_class=HTMLResponse)
-def performance_view(windows: str = "5,30,90"):
+def performance_view(windows: str = "1,5,30,90"):
     """PM forward-test: actual return + alpha vs SPY for each decision."""
     import yfinance as yf
     from datetime import datetime as _dt, timedelta as _td
@@ -1135,7 +1135,7 @@ def performance_view(windows: str = "5,30,90"):
     try:
         window_days = [int(w) for w in windows.split(",") if w.strip()]
     except ValueError:
-        window_days = [5, 30, 90]
+        window_days = [1, 5, 30, 90]
 
     with connect() as conn:
         decisions = conn.execute(
@@ -1143,7 +1143,7 @@ def performance_view(windows: str = "5,30,90"):
         ).fetchall()
 
     if not decisions:
-        return HTMLResponse("<p>No decisions yet</p><a href='/'>← Back</a>")
+        return _error_page("还没有任何 PM 决策 — 先去主页 🚀 跑一次分析")
 
     def alpha(t: str, d: str, days: int):
         try:
@@ -1193,6 +1193,23 @@ def performance_view(windows: str = "5,30,90"):
             hits = sum(1 for r in settled if r[f"hit_{w}"] == "hit")
             summary[rating][w] = (hits, len(settled))
 
+    # Maturity hint: for each window, how many decisions are old enough to settle?
+    today = date.today()
+    decision_ages = [
+        (today - _dt.strptime(d["trade_date"], "%Y-%m-%d").date()).days
+        for d in decisions
+    ]
+    oldest = max(decision_ages) if decision_ages else 0
+    next_window = next((w for w in sorted(window_days) if w > oldest), None)
+    if next_window is not None:
+        days_until = next_window - oldest
+        maturity_hint = (
+            f"最早的决策 <strong>{oldest}</strong> 天前 · "
+            f"下一个窗口 <strong>{next_window}d</strong> 还要 <strong>{days_until}</strong> 天才有数据"
+        )
+    else:
+        maturity_hint = f"最早的决策 <strong>{oldest}</strong> 天前 · 所有窗口都已成熟"
+
     return templates.TemplateResponse(
         _dummy_request(), "performance.html",
         {
@@ -1200,6 +1217,7 @@ def performance_view(windows: str = "5,30,90"):
             "n_decisions": len(decisions),
             "window_days": window_days,
             "rating_order": _RATING_ORDER,
+            "maturity_hint": maturity_hint,
         },
     )
 
@@ -1249,7 +1267,7 @@ def sectors_view():
             continue
 
     if not results:
-        return HTMLResponse("<p>yfinance 拉取失败</p><a href='/'>← Back</a>")
+        return _error_page("yfinance 拉取板块数据失败")
 
     spy_d30 = next((r["d30"] for r in results if r["symbol"] == "SPY"), 0) or 0
     spy_d90 = next((r["d90"] for r in results if r["symbol"] == "SPY"), 0) or 0
@@ -1320,7 +1338,7 @@ def charts_view():
         ).fetchall()
 
     if not rows:
-        return HTMLResponse("<p>No data</p><a href='/'>← Back</a>")
+        return _error_page("当前没有持仓数据 — 先 import broker CSV 或 ➕ 添加持仓")
 
     total = sum(r["current_value"] for r in rows)
 
@@ -1353,10 +1371,10 @@ def charts_view():
                "#0a3069", "#116329", "#7d4e00", "#5a1e93", "#a40e26",
                "#1f6feb", "#3fb950", "#d29922", "#a371f7", "#f85149"]
 
-    def render_pie(data: list[tuple[str, float]], title: str, size: int = 320) -> str:
+    def build_pie(data: list[tuple[str, float]], title: str, size: int = 320) -> dict | None:
         total_v = sum(v for _, v in data)
         if not total_v:
-            return ""
+            return None
         cx, cy, r = size / 2, size / 2, size / 2 - 8
         arcs = []
         start_angle = -math.pi / 2  # start at top
@@ -1370,37 +1388,29 @@ def charts_view():
             large = 1 if angle > math.pi else 0
             color = PALETTE[i % len(PALETTE)]
             path = f"M{cx},{cy} L{x1:.2f},{y1:.2f} A{r},{r} 0 {large},1 {x2:.2f},{y2:.2f} Z"
-            arcs.append(f'<path d="{path}" fill="{color}" stroke="var(--bg)" stroke-width="1.5"><title>{label}: ${value:,.0f} ({value/total_v*100:.1f}%)</title></path>')
-            start_angle = end_angle
-
-        # Legend
-        legend = ['<div style="display:flex;flex-direction:column;gap:4px;font-size:12px;">']
-        for i, (label, value) in enumerate(data):
-            pct = value / total_v * 100
-            color = PALETTE[i % len(PALETTE)]
-            legend.append(
-                f'<div style="display:flex;align-items:center;gap:8px;">'
-                f'<span style="display:inline-block;width:14px;height:14px;background:{color};border-radius:3px;"></span>'
-                f'<span style="flex:1;">{label}</span>'
-                f'<span style="font-variant-numeric:tabular-nums;color:var(--fg-muted);">${value/1000:.0f}K · {pct:.1f}%</span>'
-                f'</div>'
+            arcs.append(
+                f'<path d="{path}" fill="{color}" stroke="var(--bg)" stroke-width="1.5">'
+                f'<title>{label}: ${value:,.0f} ({value/total_v*100:.1f}%)</title>'
+                f'</path>'
             )
-        legend.append('</div>')
-
-        return f'''
-<div style="background:var(--bg-subtle);border-radius:8px;padding:20px;border:1px solid var(--border);margin-bottom:20px;">
-  <h3 style="margin-top:0;font-size:15px;">{title}</h3>
-  <div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap;">
-    <svg width="{size}" height="{size}" viewBox="0 0 {size} {size}" style="flex-shrink:0;">{"".join(arcs)}</svg>
-    <div style="flex:1;min-width:200px;">{"".join(legend)}</div>
-  </div>
-</div>'''
+            start_angle = end_angle
+        legend = [
+            {
+                "label": label, "value": value,
+                "pct": value / total_v * 100,
+                "color": PALETTE[i % len(PALETTE)],
+            }
+            for i, (label, value) in enumerate(data)
+        ]
+        return {"title": title, "size": size, "arcs": "".join(arcs), "legend": legend}
 
     pies = [
-        render_pie(aggregate_tickers(), "🏷️ 按 Ticker 权重"),
-        render_pie(aggregate("owner"), "👥 按 Owner"),
-        render_pie(aggregate("account_type"), "💰 按账户类型（税务桶）"),
-        render_pie(aggregate("broker"), "🏦 按 Broker"),
+        p for p in [
+            build_pie(aggregate_tickers(), "🏷️ 按 Ticker 权重"),
+            build_pie(aggregate("owner"), "👥 按 Owner"),
+            build_pie(aggregate("account_type"), "💰 按账户类型（税务桶）"),
+            build_pie(aggregate("broker"), "🏦 按 Broker"),
+        ] if p
     ]
     return templates.TemplateResponse(
         _dummy_request(), "charts.html",
@@ -1565,7 +1575,10 @@ def decision_detail(ticker: str):
             (ticker.upper(),),
         ).fetchone()
     if not row:
-        return HTMLResponse(f"<p>No decision for {ticker}</p><a href='/decisions'>← Back</a>")
+        return _error_page(
+            f"<strong>{ticker}</strong> 还没有 PM 决策记录",
+            back_url="/decisions", back_label="回到评级列表",
+        )
 
     decision_html = _md.markdown(row["final_decision"], extensions=["tables", "fenced_code"])
     return templates.TemplateResponse(
@@ -1822,6 +1835,19 @@ def _dummy_request():
     return _Req(scope={"type": "http", "headers": [], "method": "GET", "path": "/"})
 
 
+def _error_page(message: str, *, title: str = "⚠️ 出错了",
+                back_url: str = "/", back_label: str = "返回",
+                status_code: int = 200):
+    return templates.TemplateResponse(
+        _dummy_request(), "error.html",
+        {
+            "css": CSS, "title": title, "message": message,
+            "back_url": back_url, "back_label": back_label,
+        },
+        status_code=status_code,
+    )
+
+
 @app.get("/runs", response_class=HTMLResponse)
 def runs_view():
     """List all pm_run_*.log files with their current status."""
@@ -1926,7 +1952,7 @@ def run_retry(run_id: str):
 def run_detail(run_id: str):
     log_path = f"/tmp/pm_run_{run_id}.log"
     if not Path(log_path).exists():
-        return HTMLResponse(f"<p>Run {run_id} 不存在</p><a href='/runs'>← Back</a>")
+        return _error_page(f"Run <code>{run_id}</code> 不存在", back_url="/runs", back_label="运行列表")
     log_content = Path(log_path).read_text()[-10000:]
     return templates.TemplateResponse(
         _dummy_request(),
@@ -1945,12 +1971,12 @@ def run_result(run_id: str):
     """Render the REPORT.md + decisions table for a completed run."""
     log_path = f"/tmp/pm_run_{run_id}.log"
     if not Path(log_path).exists():
-        return HTMLResponse(f"<p>Run {run_id} 不存在</p><a href='/runs'>← Back</a>")
+        return _error_page(f"Run <code>{run_id}</code> 不存在", back_url="/runs", back_label="运行列表")
     out_dir = _find_output_dir_for_run(log_path)
     if out_dir is None:
-        return HTMLResponse(
-            f"<p>Run {run_id} 还没产出 (analyze_holdings 没写 outputs/ — 可能还在跑或失败了)</p>"
-            f"<a href='/runs/{run_id}'>← 查看日志</a>"
+        return _error_page(
+            f"Run <code>{run_id}</code> 还没产出 — analyze_holdings 还没写 outputs/。可能还在跑，也可能失败了。",
+            back_url=f"/runs/{run_id}", back_label="查看日志",
         )
 
     import markdown as _md

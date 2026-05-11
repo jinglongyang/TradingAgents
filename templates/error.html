@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}{{ title or "出错了" }}{% endblock %}
+
+{% block content %}
+  <h1>{{ title or "⚠️ 出错了" }}</h1>
+  <p style="color:var(--fg-muted);">{{ message|safe }}</p>
+  <div style="margin-top:20px;">
+    <a class="btn secondary" href="{{ back_url or '/' }}">← {{ back_label or "返回" }}</a>
+  </div>
+{% endblock %}

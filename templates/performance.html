@@ -7,7 +7,8 @@
   <div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>
 
   <div class="status">
-    📊 跟踪 {{ n_decisions }} 个决策 · 窗口: {{ window_days|join("d, ") }}d
+    📊 跟踪 {{ n_decisions }} 个决策 · 窗口: {{ window_days|join("d, ") }}d<br>
+    <span style="font-size:12px;">{{ maturity_hint|safe }}</span>
   </div>
 
   <h2>命中率汇总</h2>
