@@ -866,6 +866,33 @@ def decision_detail(ticker: str):
 
     decision_html = _md.markdown(row["final_decision"], extensions=["tables", "fenced_code"])
 
+    rating_tagline = {
+        "Buy": "强烈看多 — 基本面+趋势+估值全部支持，建议大幅加仓",
+        "Overweight": "超配 — 看多但克制，组合权重应高于基准（SPY 指数权重）",
+        "Hold": "持有 — 中性，基本面 OK 但当前不是好的进场点",
+        "Underweight": "低配 — 看空但不清仓，组合权重应低于基准，建议部分减仓",
+        "Sell": "强烈看空 — 基本面恶化或重大风险，建议清仓",
+    }.get(row["rating"], "")
+
+    glossary_html = """
+<details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-bottom:16px;border:1px solid var(--border);">
+<summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 5 档评级体系完整说明</summary>
+<table style="margin-top:12px;font-size:13px;">
+<thead><tr><th>评级</th><th>含义</th><th>典型动作</th></tr></thead>
+<tbody>
+<tr><td><span class="tag tag-buy" style="padding:2px 8px;">Buy</span></td><td>强烈看多</td><td>大幅加仓 / 新开仓</td></tr>
+<tr><td><span class="tag tag-overweight" style="padding:2px 8px;">Overweight</span></td><td><strong>超配</strong>：权重高于基准但不激进追价</td><td>持有 + 回调小幅加</td></tr>
+<tr><td><span class="tag tag-hold" style="padding:2px 8px;">Hold</span></td><td>中性持有</td><td>已持不动</td></tr>
+<tr><td><span class="tag tag-underweight" style="padding:2px 8px;">Underweight</span></td><td><strong>低配</strong>：权重低于基准但保留部分</td><td>分批减仓 20-35%</td></tr>
+<tr><td><span class="tag tag-sell" style="padding:2px 8px;">Sell</span></td><td>强烈看空</td><td>清仓（应税户做 TLH）</td></tr>
+</tbody>
+</table>
+<p style="margin-top:8px;font-size:12px;color:var(--fg-muted);">
+<strong>关键区分</strong>：Overweight ≠ Buy（强度）· Underweight ≠ Sell（保留 vs 全清）· "基准权重" ≈ SPY 指数权重
+</p>
+</details>
+"""
+
     return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{ticker} — PM 分析</title><style>{CSS}
 table {{ background: var(--bg-subtle); border-radius: 6px; }}
@@ -878,10 +905,13 @@ table {{ background: var(--bg-subtle); border-radius: 6px; }}
 .tag-hold {{ background: var(--border); color: var(--fg-muted); }}
 .tag-underweight {{ background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }}
 .tag-sell {{ background: color-mix(in srgb, var(--danger) 30%, transparent); color: var(--danger); }}
+.rating-tagline {{ color: var(--fg-muted); font-size: 14px; margin-top: -4px; margin-bottom: 8px; }}
 </style></head><body><div class="container">
 <h1>{ticker} <span class="tag tag-{row['rating'].lower()}" style="padding:4px 12px;font-size:14px;margin-left:8px;">{row['rating']}</span></h1>
+<p class="rating-tagline">{rating_tagline}</p>
 <p class="subtitle">分析日期: {row['trade_date']} · 录入时间: {row['created_at']}</p>
-<div style="margin-bottom:24px;"><a class="btn secondary" href="/decisions">← 回到所有评级</a> <a class="btn secondary" href="/">← 持仓页</a></div>
+<div style="margin-bottom:16px;"><a class="btn secondary" href="/decisions">← 回到所有评级</a> <a class="btn secondary" href="/">← 持仓页</a></div>
+{glossary_html}
 <div class="markdown">{decision_html}</div>
 </div></body></html>"""
 
