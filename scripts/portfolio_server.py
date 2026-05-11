@@ -374,7 +374,7 @@ def _render(message: str = ""):
         <div class="field"><label>持股数</label><input name="quantity" type="number" step="0.001" required min="0.001"></div>
       </div>
       <div class="row">
-        <div class="field"><label>当前价 <span class="hint">每股</span></label><input name="last_price" type="number" step="0.01"></div>
+        <div class="field"><label>当前价 <span class="hint">留空自动从 yfinance 拉</span></label><input name="last_price" type="number" step="0.01" placeholder="留空 = 自动"></div>
         <div class="field"><label>每股成本 <span class="hint">Robinhood 显示这个</span></label>
           <input name="avg_cost" type="number" step="0.01" id="add-avg-cost"
                  oninput="document.getElementById('add-cost-total').value = (this.value * document.querySelector('#add-modal input[name=\\'quantity\\']').value || 0).toFixed(2)"></div>
@@ -584,10 +584,36 @@ def add(
     redirect_anchor: str = Form(""),
 ):
     try:
+        symbol_clean = symbol.strip().upper()
+        price = last_price or 0.0
+
+        # Auto-fetch current price from yfinance if not provided
+        if price <= 0:
+            try:
+                import yfinance as _yf
+                from datetime import datetime as _dt
+                hist = _yf.Ticker(symbol_clean).history(period="5d")
+                if len(hist) > 0:
+                    price = float(hist["Close"].iloc[-1])
+                    # Upsert canonical price into tickers
+                    with connect() as conn:
+                        conn.execute(
+                            """
+                            INSERT INTO tickers (symbol, last_price, last_updated)
+                            VALUES (?, ?, ?)
+                            ON CONFLICT(symbol) DO UPDATE SET
+                                last_price = excluded.last_price,
+                                last_updated = excluded.last_updated
+                            """,
+                            (symbol_clean, price, _dt.now().isoformat(timespec="seconds")),
+                        )
+            except Exception:
+                pass  # leave price=0 if yfinance fails
+
         snap_id = add_position(
             account_id=account_id.strip(), account_name=account_name.strip(),
-            account_type=account_type, symbol=symbol.strip().upper(),
-            quantity=quantity, last_price=last_price or 0.0,
+            account_type=account_type, symbol=symbol_clean,
+            quantity=quantity, last_price=price,
             cost_basis_total=cost_basis_total or 0.0,
             broker=broker,
         )
