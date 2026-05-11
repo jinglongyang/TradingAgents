@@ -15,6 +15,7 @@ All data stays on localhost. The DB is ~/.tradingagents/portfolio.db.
 from __future__ import annotations
 
 import re
+import threading
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
@@ -503,15 +504,69 @@ def delete_row(snapshot_id: int = Form(...)):
     return RedirectResponse(url=f"/#{anchor}", status_code=303)
 
 
-@app.post("/enrich-tickers")
-def enrich_tickers():
-    """Pull sector / industry / name / market_cap into tickers table from yfinance.
+_enrich_state: dict = {"running": False, "started_at": None, "total": 0, "done": 0, "failed": []}
+_enrich_lock = threading.Lock()
 
-    Slower than /update-prices (one .info call per ticker, no batch API) — run
-    occasionally to fill in metadata, then use /update-prices for daily price refresh.
+
+def _enrich_worker(targets: list[str]) -> None:
+    """Background worker: pulls metadata for the given tickers one by one.
+
+    Each ticker commits independently so a kill/crash mid-batch keeps the
+    partial progress; the next /enrich-tickers re-scans for remaining NULLs.
     """
     import yfinance as _yf
+    try:
+        for sym in targets:
+            try:
+                info = _yf.Ticker(sym).info
+                with connect() as conn:
+                    conn.execute(
+                        """
+                        UPDATE tickers SET
+                            name = COALESCE(?, name),
+                            sector = COALESCE(?, sector),
+                            industry = COALESCE(?, industry),
+                            market_cap = COALESCE(?, market_cap),
+                            beta = COALESCE(?, beta)
+                        WHERE symbol = ?
+                        """,
+                        (
+                            info.get("longName") or info.get("shortName"),
+                            info.get("sector"),
+                            info.get("industry"),
+                            info.get("marketCap"),
+                            info.get("beta"),
+                            sym,
+                        ),
+                    )
+            except Exception:
+                with _enrich_lock:
+                    _enrich_state["failed"].append(sym)
+            with _enrich_lock:
+                _enrich_state["done"] += 1
+    finally:
+        with _enrich_lock:
+            _enrich_state["running"] = False
+
+
+@app.post("/enrich-tickers")
+def enrich_tickers():
+    """Kick off a background fetch of sector/industry/beta/market_cap/name from yfinance.
+
+    Returns immediately; the worker thread persists each ticker as it
+    completes. Re-running while a batch is in progress is a no-op (per the
+    _enrich_state guard). Check progress at /enrich-tickers/status or just
+    refresh /targets — sector / beta counts update live as rows persist.
+    """
     from urllib.parse import quote as _quote
+
+    with _enrich_lock:
+        if _enrich_state["running"]:
+            done, total = _enrich_state["done"], _enrich_state["total"]
+            return RedirectResponse(
+                url="/?msg=" + _quote(f"已在跑（{done}/{total}），刷新查看进度"),
+                status_code=303,
+            )
 
     with connect() as conn:
         rows = conn.execute(
@@ -522,40 +577,27 @@ def enrich_tickers():
     if not targets:
         return RedirectResponse(url="/?msg=" + _quote("所有 ticker 元数据已完整"), status_code=303)
 
-    updated = 0
-    failed: list[str] = []
-    with connect() as conn:
-        for sym in targets:
-            try:
-                info = _yf.Ticker(sym).info
-                conn.execute(
-                    """
-                    UPDATE tickers SET
-                        name = COALESCE(?, name),
-                        sector = COALESCE(?, sector),
-                        industry = COALESCE(?, industry),
-                        market_cap = COALESCE(?, market_cap),
-                        beta = COALESCE(?, beta)
-                    WHERE symbol = ?
-                    """,
-                    (
-                        info.get("longName") or info.get("shortName"),
-                        info.get("sector"),
-                        info.get("industry"),
-                        info.get("marketCap"),
-                        info.get("beta"),
-                        sym,
-                    ),
-                )
-                if conn.execute("SELECT changes()").fetchone()[0] > 0:
-                    updated += 1
-            except Exception:
-                failed.append(sym)
+    with _enrich_lock:
+        _enrich_state.update({
+            "running": True,
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "total": len(targets),
+            "done": 0,
+            "failed": [],
+        })
+    threading.Thread(target=_enrich_worker, args=(targets,), daemon=True).start()
 
-    msg = f"✓ 拉了 {updated}/{len(targets)} ticker 元数据"
-    if failed:
-        msg += f" · 失败: {', '.join(failed[:8])}"
-    return RedirectResponse(url="/?msg=" + _quote(msg), status_code=303)
+    return RedirectResponse(
+        url="/?msg=" + _quote(f"✓ 后台开始拉 {len(targets)} ticker（刷新页面看进度）"),
+        status_code=303,
+    )
+
+
+@app.get("/enrich-tickers/status")
+def enrich_status() -> dict:
+    """JSON: current progress of the most-recent enrich batch."""
+    with _enrich_lock:
+        return dict(_enrich_state)
 
 
 @app.post("/update-prices")
