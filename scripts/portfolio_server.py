@@ -295,6 +295,10 @@ def _render(message: str = ""):
   <div class="toolbar">
     <button onclick="openModal('add-modal')">➕ 添加新持仓</button>
     <button class="success" onclick="openModal('run-modal')">🚀 运行 PM 分析</button>
+    <form method="post" action="/update-prices" style="display:inline;"
+          onsubmit="return confirm('从 yfinance 拉所有持仓 ticker 最新价格？1-2 分钟。')">
+      <button class="secondary" type="submit">📡 更新价格</button>
+    </form>
     <a class="btn secondary" href="/owners">👥 按 Owner 看</a>
     <a class="btn secondary" href="/drift">⚠️ Drift Alert</a>
     <a class="btn secondary" href="/tlh">💰 TLH Finder</a>
@@ -604,6 +608,72 @@ def delete_row(snapshot_id: int = Form(...)):
         conn.execute("DELETE FROM positions_snapshot WHERE snapshot_id = ?", (snapshot_id,))
         anchor = "acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", row["account_id"])
     return RedirectResponse(url=f"/#{anchor}", status_code=303)
+
+
+@app.post("/update-prices")
+def update_prices():
+    """Refresh last_price + current_value for every position by polling yfinance."""
+    import yfinance as _yf
+
+    latest = latest_snapshot_date()
+    if not latest:
+        return _render(message='<div class="msg error">DB 为空，没数据可更新</div>')
+
+    with connect() as conn:
+        symbols = [r["symbol"] for r in conn.execute(
+            "SELECT DISTINCT symbol FROM positions_snapshot WHERE import_date = ?",
+            (latest,),
+        ).fetchall()]
+
+    if not symbols:
+        return _render(message='<div class="msg error">没有 ticker 可更新</div>')
+
+    # Batch fetch via yfinance
+    try:
+        data = _yf.download(symbols, period="5d", progress=False, auto_adjust=True)["Close"]
+    except Exception as e:
+        return _render(message=f'<div class="msg error">yfinance 错误: {e}</div>')
+
+    import pandas as _pd
+    if isinstance(data, _pd.Series):
+        data = data.to_frame()
+
+    updated = 0
+    missing = []
+    with connect() as conn:
+        for symbol in symbols:
+            if symbol not in data.columns:
+                # Try direct fetch for single-symbol edge cases
+                try:
+                    hist = _yf.Ticker(symbol).history(period="5d")
+                    if len(hist) == 0:
+                        missing.append(symbol)
+                        continue
+                    price = float(hist["Close"].iloc[-1])
+                except Exception:
+                    missing.append(symbol)
+                    continue
+            else:
+                ser = data[symbol].dropna()
+                if len(ser) == 0:
+                    missing.append(symbol)
+                    continue
+                price = float(ser.iloc[-1])
+
+            cur = conn.execute(
+                """
+                UPDATE positions_snapshot
+                SET last_price = ?, current_value = ? * quantity
+                WHERE import_date = ? AND symbol = ?
+                """,
+                (price, price, latest, symbol),
+            )
+            updated += cur.rowcount
+
+    msg_parts = [f'✓ 更新了 <strong>{updated}</strong> 行 ({len(symbols)} 个 ticker)']
+    if missing:
+        msg_parts.append(f' · 拉取失败: {", ".join(missing[:10])}')
+    return _render(message=f'<div class="msg success">{"".join(msg_parts)}</div>')
 
 
 @app.post("/account-delete", response_class=HTMLResponse)
