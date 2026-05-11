@@ -137,7 +137,14 @@ class TradingAgentsGraph:
 
     def _get_provider_kwargs(self) -> Dict[str, Any]:
         """Get provider-specific kwargs for LLM client creation."""
-        kwargs = {}
+        # Default HTTP timeout + retry so a stalled Azure/OpenAI request can't
+        # wedge a worker thread forever (the parallel analyze_holdings runner
+        # has hit this repeatedly — one hung call freezes the whole batch).
+        # Callers may override via config.
+        kwargs: Dict[str, Any] = {
+            "timeout": self.config.get("llm_timeout", 120),
+            "max_retries": self.config.get("llm_max_retries", 2),
+        }
         provider = self.config.get("llm_provider", "").lower()
 
         if provider == "google":

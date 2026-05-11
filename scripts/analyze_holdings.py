@@ -285,6 +285,10 @@ def main() -> int:
     parser.add_argument("--parallel", type=int, default=3,
                         help="How many tickers to analyze concurrently. Default 3 — "
                              "balances Azure rate limits against wall time. Use 1 for serial.")
+    parser.add_argument("--resume", type=Path, default=None,
+                        help="Resume into an existing portfolio_analysis_<ts>/ directory. "
+                             "Tickers with per_ticker/<TICKER>.json already present are skipped "
+                             "and the final REPORT/CSVs are written into the same dir.")
     args = parser.parse_args()
 
     if not args.ticker and not args.all and not args.tickers:
@@ -307,16 +311,45 @@ def main() -> int:
     log.info("Aggregated portfolio (%s): $%.0f across %d tickers", source, portfolio_total, len(holdings))
 
     tickers = select_tickers(holdings, portfolio_total, args.min_pct, args.ticker, explicit_list)
-    log.info("Will analyze %d ticker(s): %s", len(tickers), ", ".join(tickers))
 
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    out_dir = args.out_dir / f"portfolio_analysis_{timestamp}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    per_ticker_dir = out_dir / "per_ticker"
+    if args.resume:
+        out_dir = args.resume
+        if not out_dir.exists():
+            log.error("--resume path does not exist: %s", out_dir)
+            return 1
+        per_ticker_dir = out_dir / "per_ticker"
+        already_done = {p.stem for p in per_ticker_dir.glob("*.json")} if per_ticker_dir.exists() else set()
+        skipped = [t for t in tickers if t in already_done]
+        tickers = [t for t in tickers if t not in already_done]
+        if skipped:
+            log.info("Resume: skipping %d already-done ticker(s): %s", len(skipped), ", ".join(skipped))
+    else:
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        out_dir = args.out_dir / f"portfolio_analysis_{timestamp}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        per_ticker_dir = out_dir / "per_ticker"
+
+    log.info("Will analyze %d ticker(s): %s", len(tickers), ", ".join(tickers))
+    if not tickers:
+        log.info("Nothing to analyze — building REPORT/CSVs from existing per_ticker JSON.")
 
     config = build_config(args.deep_model, args.quick_model)
 
     results: list[tuple[str, Holding, dict[str, Any]]] = []
+    # Pull in any prior per-ticker JSON from a previous run so the final
+    # REPORT.md / CSVs include them alongside whatever we analyse this pass.
+    if args.resume and per_ticker_dir.exists():
+        import json as _json
+        for jp in sorted(per_ticker_dir.glob("*.json")):
+            sym = jp.stem
+            if sym not in holdings:
+                continue
+            try:
+                state = _json.loads(jp.read_text(encoding="utf-8"))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Skipping unreadable %s: %s", jp, exc)
+                continue
+            results.append((sym, holdings[sym], state))
     parallel = max(1, int(args.parallel))
     log.info("Concurrency: %d (use --parallel N to change)", parallel)
 
