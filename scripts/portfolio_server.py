@@ -2360,7 +2360,7 @@ def run_analysis(
     """Spawn analysis subprocess for tickers / sector / full portfolio."""
     import os as _os
     import subprocess as _sp
-    from datetime import date, datetimetime as _dt
+    from datetime import datetime as _dt
 
     run_id = _dt.now().strftime("%Y%m%d_%H%M%S")
     log_path = f"/tmp/pm_run_{run_id}.log"
