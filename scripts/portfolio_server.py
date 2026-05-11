@@ -141,7 +141,7 @@ def _build_holdings_view():
             """
             SELECT * FROM positions_snapshot
             WHERE import_date = ?
-            ORDER BY account_name, current_value DESC
+            ORDER BY account_name, symbol
             """,
             (latest,) if latest else (today,),
         ).fetchall()
