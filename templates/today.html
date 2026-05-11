@@ -88,12 +88,16 @@
             <th class="num" title="预期上涨 / 至止损下跌">收益/风险</th>
             <th class="num" title="当前组合占比 vs 目标占比">权重</th>
             <th>理由</th>
+            <th style="width:80px;"></th>
           </tr>
         </thead>
         <tbody>
           {% for i in acct.reduces %}
-          <tr>
-            <td><span style="background:var(--loss);color:white;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600;">先减</span></td>
+          <tr style="opacity:{{ '0.45' if i.executed else '1' }};">
+            <td>
+              {% if i.executed %}<span style="background:var(--fg-muted);color:white;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600;">✓ 已执行</span>
+              {% else %}<span style="background:var(--loss);color:white;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600;">先减</span>{% endif %}
+            </td>
             <td><a href="/decisions/{{ i.ticker }}" style="font-weight:600;color:var(--loss);">{{ i.ticker }}</a>
                 <span class="tag tag-{{ i.rating|lower }}" style="padding:1px 5px;font-size:10px;margin-left:4px;">{{ i.rating }}</span></td>
             <td><strong style="color:var(--loss);">{{ i.action }}</strong></td>
@@ -108,14 +112,25 @@
             <td class="num" style="font-size:11px;color:var(--fg-muted);">—</td>
             <td class="num" style="font-size:11px;color:var(--fg-muted);">—</td>
             <td style="font-size:12px;color:var(--fg-muted);max-width:380px;">{{ i.rationale }}</td>
+            <td>
+              {% if not i.executed %}
+              <button type="button" class="btn small danger" style="padding:3px 8px;font-size:11px;"
+                onclick="openExec('SELL', '{{ i.account_id }}', '{{ i.account_name|e }}', '{{ i.account_type }}', '{{ i.ticker }}', {{ i.est_shares or 0 }}, {{ i.current_price or 0 }})">
+                执行
+              </button>
+              {% endif %}
+            </td>
           </tr>
           {% endfor %}
           {% for i in acct.adds %}
           {% set badge_bg = {'full':'var(--gain)', 'partial':'#d97706', 'skip':'var(--fg-muted)', 'unknown':'var(--fg-muted)'}[i.alloc_status] %}
           {% set badge_text = {'full':'✓ '~loop.index, 'partial':'◐ '~loop.index, 'skip':'✗ '~loop.index, 'unknown':loop.index|string}[i.alloc_status] %}
-          {% set row_opacity = '0.5' if i.alloc_status == 'skip' else '1' %}
+          {% set row_opacity = '0.45' if i.executed else ('0.5' if i.alloc_status == 'skip' else '1') %}
           <tr style="opacity:{{ row_opacity }};">
-            <td><span style="background:{{ badge_bg }};color:white;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600;">{{ badge_text }}</span></td>
+            <td>
+              {% if i.executed %}<span style="background:var(--fg-muted);color:white;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600;">✓ 已执行</span>
+              {% else %}<span style="background:{{ badge_bg }};color:white;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600;">{{ badge_text }}</span>{% endif %}
+            </td>
             <td><a href="/decisions/{{ i.ticker }}" style="font-weight:600;color:var(--gain);">{{ i.ticker }}</a>
                 <span class="tag tag-{{ i.rating|lower }}" style="padding:1px 5px;font-size:10px;margin-left:4px;">{{ i.rating }}</span></td>
             <td><strong style="color:var(--gain);">{{ i.action }}</strong></td>
@@ -161,6 +176,14 @@
               {% endif %}
             </td>
             <td style="font-size:12px;color:var(--fg-muted);max-width:380px;">{{ i.rationale }}</td>
+            <td>
+              {% if not i.executed %}
+              <button type="button" class="btn small success" style="padding:3px 8px;font-size:11px;"
+                onclick="openExec('BUY', '{{ i.account_id }}', '{{ i.account_name|e }}', '{{ i.account_type }}', '{{ i.ticker }}', {{ i.est_shares or 0 }}, {{ i.current_price or 0 }})">
+                执行
+              </button>
+              {% endif %}
+            </td>
           </tr>
           {% endfor %}
         </tbody>
@@ -168,6 +191,33 @@
     </div>
     {% endif %}
   {% endfor %}
+
+  {# Shared exec modal — single instance, JS populates per-row click #}
+  <div id="exec-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:100;align-items:center;justify-content:center;">
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:20px;max-width:440px;width:90%;">
+      <h3 style="margin-top:0;" id="exec-title">执行</h3>
+      <form method="post" action="/today/execute">
+        <input type="hidden" name="action_type" id="exec-action-type">
+        <input type="hidden" name="account_id" id="exec-account-id">
+        <input type="hidden" name="account_name" id="exec-account-name">
+        <input type="hidden" name="account_type" id="exec-account-type">
+        <input type="hidden" name="symbol" id="exec-symbol">
+        <div id="exec-summary" style="font-size:13px;color:var(--fg-muted);margin-bottom:12px;"></div>
+        <div class="row" style="display:flex;gap:8px;">
+          <div class="field" style="flex:1;"><label>股数</label>
+            <input name="shares" id="exec-shares" type="number" step="0.001" required min="0.001"></div>
+          <div class="field" style="flex:1;"><label>成交价</label>
+            <input name="price" id="exec-price" type="number" step="0.001" required min="0"></div>
+        </div>
+        <div class="field"><label>备注（可选）</label>
+          <input name="note" placeholder="默认 'via /today'"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">
+          <button type="button" class="btn secondary" onclick="closeExec()">取消</button>
+          <button type="submit" class="btn" id="exec-submit">确认执行</button>
+        </div>
+      </form>
+    </div>
+  </div>
 
   {# Hold-only accounts collapsed at bottom #}
   {% set hold_only = accounts | rejectattr('has_action') | list %}
@@ -186,4 +236,30 @@
       </div>
     </details>
   {% endif %}
+
+  <script>
+    function openExec(actionType, acctId, acctName, acctType, ticker, estShares, currentPrice) {
+      document.getElementById('exec-action-type').value = actionType;
+      document.getElementById('exec-account-id').value = acctId;
+      document.getElementById('exec-account-name').value = acctName;
+      document.getElementById('exec-account-type').value = acctType;
+      document.getElementById('exec-symbol').value = ticker;
+      document.getElementById('exec-shares').value = (estShares > 0 ? estShares.toFixed(3) : '');
+      document.getElementById('exec-price').value = (currentPrice > 0 ? currentPrice.toFixed(2) : '');
+      const verb = actionType === 'BUY' ? '买入' : '卖出';
+      document.getElementById('exec-title').textContent = verb + ' ' + ticker + ' — ' + acctName;
+      document.getElementById('exec-summary').textContent =
+        '账户 [' + acctType + '] · 估算 ' + (estShares > 0 ? estShares.toFixed(3) + ' 股' : '?') +
+        ' @ $' + (currentPrice > 0 ? currentPrice.toFixed(2) : '?');
+      const submit = document.getElementById('exec-submit');
+      submit.className = 'btn ' + (actionType === 'BUY' ? 'success' : 'danger');
+      document.getElementById('exec-modal').style.display = 'flex';
+    }
+    function closeExec() {
+      document.getElementById('exec-modal').style.display = 'none';
+    }
+    document.getElementById('exec-modal').addEventListener('click', function(e) {
+      if (e.target === this) closeExec();
+    });
+  </script>
 {% endblock %}

@@ -1876,6 +1876,80 @@ def set_target_weight(symbol: str = Form(...), target_pct: str = Form("")):
     return RedirectResponse(url="/targets", status_code=303)
 
 
+@app.post("/today/execute")
+def today_execute(
+    action_type: str = Form(...),
+    account_id: str = Form(...),
+    account_name: str = Form(...),
+    account_type: str = Form("Taxable"),
+    symbol: str = Form(...),
+    shares: float = Form(...),
+    price: float = Form(...),
+    note: Optional[str] = Form(None),
+):
+    """One-click execution from /today: writes the execution row AND mutates
+    the snapshot in the same shape as /add (for BUY) or /sell (for SELL).
+
+    Mirrors the existing endpoints rather than calling them so the redirect
+    stays on /today instead of jumping to the holdings home page.
+    """
+    sym = symbol.strip().upper()
+    aid = account_id.strip()
+    aname = account_name.strip()
+    action = action_type.upper()
+    today = date.today().isoformat()
+    note_final = (note.strip() if note else "") or "via /today"
+
+    if action not in ("BUY", "SELL"):
+        return _render(message=f"✗ 不支持的动作: {action}", level="error")
+
+    if action == "BUY":
+        cost = shares * price
+        add_position(
+            account_id=aid, account_name=aname,
+            account_type=account_type, symbol=sym,
+            quantity=shares, last_price=price, cost_basis_total=cost,
+            broker="Manual",
+        )
+        record_execution(
+            trade_date=today, account_id=aid, account_name=aname, symbol=sym,
+            action="BUY", shares=shares, price=price, note=note_final,
+        )
+    else:  # SELL
+        record_execution(
+            trade_date=today, account_id=aid, account_name=aname, symbol=sym,
+            action="SELL", shares=shares, price=price, note=note_final,
+        )
+        latest = latest_snapshot_date()
+        with connect() as conn:
+            row = conn.execute(
+                """
+                SELECT snapshot_id, quantity FROM positions_snapshot
+                WHERE import_date = ? AND account_id = ? AND symbol = ?
+                """,
+                (latest, aid, sym),
+            ).fetchone()
+            if row:
+                new_qty = row["quantity"] - shares
+                if new_qty <= 0.001:
+                    conn.execute(
+                        "DELETE FROM positions_snapshot WHERE snapshot_id = ?",
+                        (row["snapshot_id"],),
+                    )
+                else:
+                    new_value = new_qty * price
+                    conn.execute(
+                        """
+                        UPDATE positions_snapshot
+                        SET quantity = ?, current_value = ?, last_price = ?
+                        WHERE snapshot_id = ?
+                        """,
+                        (new_qty, new_value, price, row["snapshot_id"]),
+                    )
+
+    return RedirectResponse(url="/today", status_code=303)
+
+
 @app.post("/account-cash")
 def set_account_cash(account_id: str = Form(...), cash: float = Form(0.0)):
     """Persist the user-entered cash balance for one account.
@@ -2039,10 +2113,22 @@ def today_view():
             }
         by_account[aid][it["bucket"] + "s"].append(it)
 
-    # Load user-entered cash balances (init_db creates the table)
+    # Load user-entered cash balances + today's executions for done-marking
+    today_iso = date.today().isoformat()
     with connect() as conn:
         cash_rows = conn.execute("SELECT account_id, cash FROM account_cash").fetchall()
+        exec_rows = conn.execute(
+            "SELECT account_id, symbol, action FROM executions WHERE trade_date = ?",
+            (today_iso,),
+        ).fetchall()
     account_cash = {r["account_id"]: r["cash"] for r in cash_rows}
+    executed_set = {(r["account_id"], r["symbol"], r["action"]) for r in exec_rows}
+
+    # Tag each item as executed if today's executions cover it
+    _bucket_to_action = {"add": "BUY", "reduce": "SELL"}
+    for it in items:
+        ea = _bucket_to_action.get(it["bucket"])
+        it["executed"] = bool(ea and (it["account_id"], it["ticker"], ea) in executed_set)
 
     # Per-account: sort reduces by $ desc (biggest derisk first), adds by
     # priority score desc (most important first when cash runs out). Then
