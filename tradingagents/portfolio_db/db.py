@@ -214,4 +214,22 @@ def init_db(db_path: Path | None = None) -> Path:
             )
             """
         )
+
+        # Cached pairwise daily-return correlations over a fixed look-back
+        # window. Used by /today to discount add priorities for buys that
+        # heavily overlap with another buy already higher in the queue (e.g.
+        # buying NVDA, AMD, AVGO together isn't 3x diversified). symbol_a is
+        # stored alphabetically before symbol_b so each pair has one row.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ticker_correlations (
+                symbol_a     TEXT NOT NULL,
+                symbol_b     TEXT NOT NULL,
+                correlation  REAL NOT NULL,
+                period_days  INTEGER NOT NULL DEFAULT 90,
+                updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (symbol_a, symbol_b)
+            )
+            """
+        )
     return path

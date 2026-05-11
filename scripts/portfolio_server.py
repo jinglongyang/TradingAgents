@@ -1717,6 +1717,76 @@ def _extract_price_levels(md: str) -> tuple[float | None, float | None]:
     return pt_val, sl_val
 
 
+_CORR_CACHE_TTL_DAYS = 7
+_CORR_LOOKBACK_DAYS = 90
+
+
+def _load_correlations(tickers: list[str]) -> dict[tuple[str, str], float]:
+    """Return a dict keyed by alphabetically-ordered pair → correlation.
+
+    Reads from ``ticker_correlations``; fetches and persists any missing or
+    stale (>7 days) pair via yfinance daily closes over the last 90 days.
+    Pair keys are ``(min, max)`` so callers can look up symmetrically."""
+    if len(tickers) < 2:
+        return {}
+    tickers = sorted(set(tickers))
+    pairs_needed = [(a, b) for i, a in enumerate(tickers) for b in tickers[i + 1:]]
+
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT symbol_a, symbol_b, correlation FROM ticker_correlations
+            WHERE updated_at > datetime('now', '-{_CORR_CACHE_TTL_DAYS} days')
+              AND symbol_a IN ({','.join('?' * len(tickers))})
+              AND symbol_b IN ({','.join('?' * len(tickers))})
+            """,
+            tickers + tickers,
+        ).fetchall()
+    cached = {(r["symbol_a"], r["symbol_b"]): r["correlation"] for r in rows}
+    missing = [p for p in pairs_needed if p not in cached]
+
+    if missing:
+        # Fetch all involved tickers in one yfinance call to amortise cost,
+        # then compute correlations only for the missing pairs.
+        try:
+            import yfinance as _yf
+            import pandas as _pd
+            data = _yf.download(
+                tickers, period=f"{_CORR_LOOKBACK_DAYS}d",
+                progress=False, auto_adjust=True,
+            )["Close"]
+            if isinstance(data, _pd.Series):
+                data = data.to_frame()
+            returns = data.pct_change().dropna()
+            corr_matrix = returns.corr()
+        except Exception:
+            corr_matrix = None
+
+        if corr_matrix is not None:
+            with connect() as conn:
+                for a, b in missing:
+                    if a not in corr_matrix.columns or b not in corr_matrix.columns:
+                        continue
+                    v = corr_matrix.loc[a, b]
+                    if v != v:  # NaN check
+                        continue
+                    v_float = float(v)
+                    conn.execute(
+                        """
+                        INSERT INTO ticker_correlations
+                            (symbol_a, symbol_b, correlation, period_days, updated_at)
+                        VALUES (?, ?, ?, ?, datetime('now'))
+                        ON CONFLICT(symbol_a, symbol_b) DO UPDATE SET
+                            correlation = excluded.correlation,
+                            period_days = excluded.period_days,
+                            updated_at  = excluded.updated_at
+                        """,
+                        (a, b, v_float, _CORR_LOOKBACK_DAYS),
+                    )
+                    cached[(a, b)] = v_float
+    return cached
+
+
 def _priority_score(item: dict) -> float:
     """Higher = do first. Composite of rating strength, account tax efficiency,
     ticker drift, sector drift, expected return, and dollar magnitude.
@@ -2139,6 +2209,39 @@ def today_view():
         ea = _bucket_to_action.get(it["bucket"])
         it["executed"] = bool(ea and (it["account_id"], it["ticker"], ea) in executed_set)
 
+    # Two-pass priority: compute base score, then walk adds in priority order
+    # and discount items that overlap heavily with an already-prioritised add.
+    # AVGO+AMD+NVDA together isn't 3x diversified — the 3rd buy should get
+    # pushed down behind less-correlated alternatives.
+    add_tickers = sorted({it["ticker"] for it in items if it["bucket"] == "add"})
+    corr_lookup = _load_correlations(add_tickers) if len(add_tickers) >= 2 else {}
+
+    def _corr(a: str, b: str) -> float | None:
+        return corr_lookup.get(tuple(sorted([a, b])))
+
+    add_items = [it for it in items if it["bucket"] == "add"]
+    add_items.sort(key=lambda x: -_priority_score(x))
+    seen_tickers: list[str] = []
+    for it in add_items:
+        t = it["ticker"]
+        max_corr, max_other = 0.0, None
+        for other in seen_tickers:
+            if other == t:
+                continue
+            c = _corr(t, other)
+            if c is not None and c > max_corr:
+                max_corr, max_other = c, other
+        # Apply correlation penalty linearly above 0.4 — US large-cap tech
+        # rarely exceeds 0.7 over 90 days, so a stricter threshold never
+        # fires. 500 scaling makes a 0.6 correlation cost ~100 points
+        # (similar to one tier of tax_weight).
+        penalty = max(0.0, max_corr - 0.4) * 500 if max_corr > 0.4 else 0
+        it["corr_max"] = max_corr if max_corr > 0 else None
+        it["corr_with"] = max_other
+        it["corr_penalty"] = penalty
+        it["adjusted_priority"] = _priority_score(it) - penalty
+        seen_tickers.append(t)
+
     # Per-account: sort reduces by $ desc (biggest derisk first), adds by
     # priority score desc (most important first when cash runs out). Then
     # greedy-allocate available cash (user-entered + reduce proceeds) down
@@ -2149,7 +2252,10 @@ def today_view():
         # Reduces: sort by beta-weighted dollar exposure (risk_value), so a
         # high-beta position trims ahead of a low-beta one of the same $ size.
         acct["reduces"].sort(key=lambda x: -(x["risk_value"] or 0))
-        acct["adds"].sort(key=lambda x: -_priority_score(x))
+        # Adds: sort by correlation-adjusted priority (set above). Falls back
+        # to base score for items missing adjusted_priority (shouldn't happen
+        # but defensive).
+        acct["adds"].sort(key=lambda x: -(x.get("adjusted_priority") or _priority_score(x)))
         acct["cash_in"] = sum((x["est_value"] or 0) for x in acct["reduces"])
         acct["cash_out"] = sum((x["est_value"] or 0) for x in acct["adds"])
         acct["net"] = acct["cash_in"] - acct["cash_out"]
