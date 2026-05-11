@@ -167,6 +167,13 @@
           <textarea name="instruction" rows="3" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-family:inherit;font-size:14px;resize:vertical;" placeholder="例如：我下个月房产购买，避免 $5K+ 资本利得；优先 TLH"></textarea>
         </div>
 
+        <div class="field" style="display:flex;align-items:center;gap:8px;">
+          <input type="checkbox" name="force" value="1" id="run-force" style="width:auto;">
+          <label for="run-force" style="margin:0;font-weight:400;font-size:13px;color:var(--fg-muted);">
+            强制重跑 <span class="hint">忽略 30 分钟内已有结果 + 正在跑的同样参数 run</span>
+          </label>
+        </div>
+
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
           <button type="button" class="secondary" onclick="closeModal('run-modal')">取消</button>
           <button type="submit" class="success">🚀 启动分析</button>

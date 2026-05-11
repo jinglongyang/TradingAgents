@@ -1661,12 +1661,64 @@ def executions_view():
     )
 
 
+_CACHE_FRESHNESS_MIN = 30  # minutes — recent decisions reused unless force=1
+
+
+def _find_inflight_run(want_meta: dict[str, str]) -> str | None:
+    """Return a run_id with the same parameters that is still in flight."""
+    import glob as _g
+    for meta_path in sorted(_g.glob("/tmp/pm_run_*.meta"), reverse=True)[:50]:
+        try:
+            meta = {}
+            for line in Path(meta_path).read_text().splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    meta[k] = v
+        except OSError:
+            continue
+        # Match the parameters we care about
+        if not all(meta.get(k, "") == v for k, v in want_meta.items()):
+            continue
+        run_id = Path(meta_path).stem.replace("pm_run_", "")
+        status_path = f"/tmp/pm_run_{run_id}.status"
+        pid_path = f"/tmp/pm_run_{run_id}.pid"
+        effective, _ = _classify_run(f"/tmp/pm_run_{run_id}.log", status_path, pid_path)
+        if effective in ("queued", "running"):
+            return run_id
+    return None
+
+
+def _cached_decisions(tickers: list[str], freshness_min: int = _CACHE_FRESHNESS_MIN) -> dict[str, str]:
+    """Return {symbol: trade_date} for tickers with a decision created within
+    the freshness window. Used to skip a re-run when nothing has changed.
+
+    decisions.created_at is stored as UTC (sqlite ``datetime('now')`` default),
+    so we compare against UTC — never use ``localtime`` here, that's a 7-8h bug.
+    """
+    if not tickers:
+        return {}
+    with connect() as conn:
+        placeholders = ",".join("?" * len(tickers))
+        rows = conn.execute(
+            f"""
+            SELECT symbol, MAX(created_at) AS latest_at, trade_date
+              FROM decisions
+             WHERE symbol IN ({placeholders})
+               AND created_at >= datetime('now', ?)
+             GROUP BY symbol
+            """,
+            (*tickers, f"-{freshness_min} minutes"),
+        ).fetchall()
+    return {r["symbol"]: r["trade_date"] for r in rows}
+
+
 @app.post("/run", response_class=HTMLResponse)
 def run_analysis(
     mode: str = Form("tickers"),
     tickers: str = Form(""),
     sector: str = Form(""),
     instruction: str = Form(""),
+    force: int = Form(0),
 ):
     """Spawn analysis subprocess for tickers / sector / full portfolio."""
     import os as _os
@@ -1684,6 +1736,20 @@ def run_analysis(
     if mode == "sector":
         if not sector.strip():
             return _render(message='没有提供行业描述', level='error')
+        if not force:
+            existing = _find_inflight_run({
+                "mode": "sector", "sector": sector,
+                "instruction": instruction[:500],
+            })
+            if existing:
+                return _render(
+                    message=(
+                        f"🔁 同样的行业分析 <code>{existing}</code> 还在跑，自动跳到那个进度。"
+                        f' 想强制重跑就回到首页 🚀 modal 用相同参数 + 勾选"强制重跑"。'
+                        f' <a href="/runs/{existing}">查看进度</a>'
+                    ),
+                    level="success",
+                )
         cmd_chain = [
             f"uv run python scripts/analyze_sector.py --sector '{sector.strip()}'",
             "uv run python scripts/migrate_decisions_to_db.py",
@@ -1742,6 +1808,36 @@ def run_analysis(
 
     held_tickers = [t for t in ticker_list if t in held]
     new_tickers = [t for t in ticker_list if t not in held]
+
+    # Dedup checks — skip when force=1.
+    if not force:
+        # 1. In-flight: same ticker list + same instruction still running?
+        canon_tickers = ",".join(sorted(ticker_list))
+        existing = _find_inflight_run({
+            "tickers": ",".join(ticker_list),
+            "instruction": instruction[:500],
+        })
+        if existing:
+            return _render(
+                message=(
+                    f"🔁 相同参数 ({canon_tickers}) 的 run <code>{existing}</code> 还在跑，"
+                    f'跳到那个进度。 <a href="/runs/{existing}">查看 →</a>'
+                ),
+                level="success",
+            )
+
+        # 2. Cache: all tickers have a decision created within freshness window?
+        cached = _cached_decisions(ticker_list)
+        if cached and all(t in cached for t in ticker_list):
+            links = " · ".join(f'<a href="/decisions/{t}">{t}</a>' for t in ticker_list)
+            return _render(
+                message=(
+                    f'🗄️ {_CACHE_FRESHNESS_MIN} 分钟内已分析过这些 ticker，跳过重跑。'
+                    f' 查看: {links} · '
+                    f'<a href="/?force_msg=use_force">强制重跑见说明</a>'
+                ),
+                level="success",
+            )
 
     run_id = _dt.now().strftime("%Y%m%d_%H%M%S")
     log_path = f"/tmp/pm_run_{run_id}.log"
