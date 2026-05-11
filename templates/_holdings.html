@@ -1,0 +1,52 @@
+{# Holdings table partial — receives `accounts` from context. #}
+{% if not accounts %}
+  <p style="color:var(--fg-muted);">DB 暂时为空 — 点 "添加持仓" 开始</p>
+{% else %}
+  {% for a in accounts %}
+    <div class="account">
+      <div class="account-header">
+        <div>
+          <button class="small secondary"
+                  onclick="openAccountEdit('{{ a.account_id }}', `{{ a.account_name }}`, '{{ a.broker }}', '{{ a.account_type }}', '{{ a.owner }}')"
+                  style="margin-right:8px;padding:2px 8px;font-size:11px;">✎ 编辑账户</button>
+          <span class="account-name">{{ a.account_name }}</span>
+          <span class="tag tag-{{ a.account_type_lower }}">{{ a.account_type }}</span>
+          <span class="tag" style="margin-left:4px;font-size:10px;background:var(--bg);border:1px solid var(--border);">🏦 {{ a.broker }}</span>
+          <span class="tag" style="margin-left:4px;font-size:10px;background:var(--bg);border:1px solid var(--border);">👤 {{ a.owner }}</span>
+        </div>
+        <div class="account-meta">
+          {{ a.n_positions }} 仓位 · ${{ "{:,.0f}".format(a.subtotal) }}
+          <button class="small success" style="margin-left:8px;padding:3px 10px;font-size:11px;"
+                  onclick="openAddToAccount('{{ a.account_id }}', `{{ a.account_name }}`, '{{ a.broker }}', '{{ a.account_type }}', '{{ a.owner }}')">➕ 加 ticker</button>
+        </div>
+      </div>
+      <div id="{{ a.anchor }}" style="scroll-margin-top:80px;"></div>
+      <table>
+        <thead>
+          <tr><th>Ticker</th><th class="num">持股</th><th class="num">价格</th><th class="num">价值</th><th class="num">成本</th><th class="num">P/L%</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for p in a.positions %}
+          <tr>
+            <td><strong>{{ p.symbol }}</strong></td>
+            <td class="num">{{ "%.3f"|format(p.quantity) }}</td>
+            <td class="num">${{ "%.2f"|format(p.last_price) }}</td>
+            <td class="num">${{ "{:,.0f}".format(p.current_value) }}</td>
+            <td class="num">${{ "{:,.0f}".format(p.cost) }}</td>
+            <td class="num {{ p.pl_class }}">{{ "%+.1f"|format(p.pl_pct) }}%</td>
+            <td class="actions">
+              <button class="small secondary"
+                      onclick="openEdit({{ p.snapshot_id }}, '{{ p.symbol }}', {{ p.quantity }}, {{ p.last_price }}, {{ p.cost }}, '{{ p.broker }}')">Edit</button>
+              <button class="small danger"
+                      onclick="openSell('{{ p.symbol }}', '{{ a.account_id }}', '{{ a.account_name }}', {{ p.quantity }})">Sell</button>
+              <button class="small" style="background:transparent;color:var(--fg-muted);border:1px solid var(--border);"
+                      onclick="deleteRow({{ p.snapshot_id }}, '{{ p.symbol }}')"
+                      title="删除该行（数据错误时用，不记入交易）">🗑️</button>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endfor %}
+{% endif %}

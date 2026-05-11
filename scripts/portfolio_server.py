@@ -194,6 +194,11 @@ function openEdit(snapshotId, sym, qty, price, cost, broker) {
 
 
 def _build_holdings_view():
+    """Return (accounts, n_rows, total_value).
+
+    `accounts` is a list of dicts ready for `_holdings.html` to render. All
+    HTML/formatting decisions are made in the template, not here.
+    """
     today = date.today().isoformat()
     latest = latest_snapshot_date()
     with connect() as conn:
@@ -211,71 +216,56 @@ def _build_holdings_view():
         ).fetchall()
 
     if not rows:
-        return '<p style="color:var(--fg-muted);">DB 暂时为空 — 点 "添加持仓" 开始</p>', 0, 0.0
+        return [], 0, 0.0
 
-    # Convert rows so that downstream code reading r["last_price"] /
-    # r["current_value"] transparently gets the canonical tickers price.
     rows = [
-        {**dict(r), "last_price": r["authoritative_price"] or 0,
+        {**dict(r),
+         "last_price": r["authoritative_price"] or 0,
          "current_value": r["authoritative_value"] or 0}
         for r in rows
     ]
-    # Group by account
+
     by_account: dict[tuple[str, str], list] = {}
     for r in rows:
-        key = (r["account_id"], r["account_name"])
-        by_account.setdefault(key, []).append(r)
+        by_account.setdefault((r["account_id"], r["account_name"]), []).append(r)
 
-    out = []
+    accounts: list[dict] = []
     total = 0.0
-    for (aid, aname), items in sorted(by_account.items(), key=lambda kv: -sum(r["current_value"] for r in kv[1])):
-        sub = sum(r["current_value"] for r in items)
-        total += sub
+    for (aid, aname), items in sorted(
+        by_account.items(),
+        key=lambda kv: -sum(r["current_value"] for r in kv[1]),
+    ):
+        subtotal = sum(r["current_value"] for r in items)
+        total += subtotal
         atype = items[0]["account_type"]
-        broker = items[0]["broker"] or "—"
-        owner = items[0]["owner"] or "—"
-        out.append(f'''
-<div class="account">
-  <div class="account-header">
-    <div>
-      <button class="small secondary" onclick="openAccountEdit('{aid}', `{aname}`, '{broker}', '{atype}', '{owner}')"
-              style="margin-right:8px;padding:2px 8px;font-size:11px;">✎ 编辑账户</button>
-      <span class="account-name">{aname}</span>
-      <span class="tag tag-{atype.lower()}">{atype}</span>
-      <span class="tag" style="margin-left:4px;font-size:10px;background:var(--bg);border:1px solid var(--border);">🏦 {broker}</span>
-      <span class="tag" style="margin-left:4px;font-size:10px;background:var(--bg);border:1px solid var(--border);">👤 {owner}</span>
-    </div>
-    <div class="account-meta">
-      {len(items)} 仓位 · ${sub:,.0f}
-      <button class="small success" style="margin-left:8px;padding:3px 10px;font-size:11px;"
-              onclick="openAddToAccount('{aid}', `{aname}`, '{broker}', '{atype}', '{owner}')">➕ 加 ticker</button>
-    </div>
-  </div>
-  <div id="acct-{re.sub(r"[^a-zA-Z0-9_-]", "_", aid)}" style="scroll-margin-top:80px;"></div>
-  <table>
-    <thead><tr><th>Ticker</th><th class="num">持股</th><th class="num">价格</th><th class="num">价值</th><th class="num">成本</th><th class="num">P/L%</th><th></th></tr></thead>
-    <tbody>''')
+        positions = []
         for r in items:
             cost = r["cost_basis_total"] or 0
             pl_pct = ((r["current_value"] - cost) / cost * 100) if cost else 0.0
-            pl_class = "gain" if pl_pct >= 0 else "loss"
-            out.append(f'''
-      <tr>
-        <td><strong>{r['symbol']}</strong></td>
-        <td class="num">{r['quantity']:.3f}</td>
-        <td class="num">${r['last_price']:.2f}</td>
-        <td class="num">${r['current_value']:,.0f}</td>
-        <td class="num">${cost:,.0f}</td>
-        <td class="num {pl_class}">{pl_pct:+.1f}%</td>
-        <td class="actions">
-          <button class="small secondary" onclick="openEdit({r['snapshot_id']}, '{r['symbol']}', {r['quantity']}, {r['last_price']}, {cost}, '{r['broker'] or 'Fidelity'}')">Edit</button>
-          <button class="small danger" onclick="openSell('{r['symbol']}', '{aid}', '{aname}', {r['quantity']})">Sell</button>
-          <button class="small" style="background:transparent;color:var(--fg-muted);border:1px solid var(--border);"
-                  onclick="deleteRow({r['snapshot_id']}, '{r['symbol']}')" title="删除该行（数据错误时用，不记入交易）">🗑️</button>
-        </td>
-      </tr>''')
-        out.append('</tbody></table></div>')
-    return "\n".join(out), len(rows), total
+            positions.append({
+                "snapshot_id": r["snapshot_id"],
+                "symbol": r["symbol"],
+                "quantity": r["quantity"],
+                "last_price": r["last_price"],
+                "current_value": r["current_value"],
+                "cost": cost,
+                "pl_pct": pl_pct,
+                "pl_class": "gain" if pl_pct >= 0 else "loss",
+                "broker": r["broker"] or "Fidelity",
+            })
+        accounts.append({
+            "account_id": aid,
+            "account_name": aname,
+            "account_type": atype,
+            "account_type_lower": atype.lower(),
+            "broker": items[0]["broker"] or "—",
+            "owner": items[0]["owner"] or "—",
+            "anchor": "acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", aid),
+            "subtotal": subtotal,
+            "n_positions": len(items),
+            "positions": positions,
+        })
+    return accounts, len(rows), total
 
 
 def _ticker_pool() -> list[dict[str, str]]:
@@ -308,7 +298,7 @@ def _render(message: str = "", level: str = "success"):
     Empty `message` means no flash banner.
     """
     import json as _json
-    html_view, n_rows, total_val = _build_holdings_view()
+    accounts, n_rows, total_val = _build_holdings_view()
     ticker_pool = _ticker_pool()
     flash = {"text": message, "level": level} if message else None
     return templates.TemplateResponse(
@@ -317,7 +307,7 @@ def _render(message: str = "", level: str = "success"):
         {
             "css": CSS,
             "extra_js": JS,
-            "holdings_html": html_view,
+            "accounts": accounts,
             "n_rows": n_rows,
             "total_val": total_val,
             "latest": latest_snapshot_date() or "(none)",
