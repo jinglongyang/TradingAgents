@@ -1685,6 +1685,95 @@ _RATING_TAGLINE = {
 }
 
 
+_ACTION_BUCKETS = {
+    "Reduce": "reduce", "Sell": "reduce", "Trim": "reduce",
+    "Add": "add", "Buy": "add", "Initiate": "add", "Open": "add",
+}
+
+
+@app.get("/today", response_class=HTMLResponse)
+def today_view():
+    """Consolidated action list for the latest decision date.
+
+    Groups every per-account action across all tickers into Reduce / Add /
+    Hold buckets so the user can execute trades top-down without clicking
+    into each ticker. Reduces float to the top — finish derisking before
+    deploying capital.
+    """
+    import json as _json
+    with connect() as conn:
+        latest_row = conn.execute(
+            "SELECT MAX(trade_date) AS d FROM decisions"
+        ).fetchone()
+        trade_date = latest_row["d"] if latest_row else None
+        decisions = conn.execute(
+            "SELECT symbol, rating, account_actions FROM decisions WHERE trade_date = ? ORDER BY symbol",
+            (trade_date,),
+        ).fetchall() if trade_date else []
+        snapshot = {
+            (r["account_id"], r["symbol"]): dict(r)
+            for r in conn.execute(
+                """
+                SELECT account_id, account_name, symbol, quantity, last_price, current_value
+                FROM positions_snapshot
+                WHERE import_date = (SELECT MAX(import_date) FROM positions_snapshot)
+                """
+            ).fetchall()
+        }
+
+    name_to_account = {}
+    for (_aid, _sym), row in snapshot.items():
+        name_to_account.setdefault(row["account_name"], row["account_id"])
+
+    reduces, adds, holds = [], [], []
+    for d in decisions:
+        actions = _json.loads(d["account_actions"]) if d["account_actions"] else []
+        for a in actions:
+            account_name = a.get("account_name", "")
+            account_id = name_to_account.get(account_name)
+            pos = snapshot.get((account_id, d["symbol"])) if account_id else None
+            qty = pos["quantity"] if pos else None
+            price = pos["last_price"] if pos else None
+            size_pct = a.get("size_pct")
+            est_shares = (qty * size_pct / 100.0) if (qty and size_pct) else None
+
+            item = {
+                "ticker": d["symbol"],
+                "rating": d["rating"],
+                "account_name": account_name,
+                "account_type": a.get("account_type", ""),
+                "action": a.get("action", ""),
+                "size_pct": size_pct,
+                "current_qty": qty,
+                "current_price": price,
+                "est_shares": est_shares,
+                "est_value": (est_shares * price) if (est_shares and price) else None,
+                "rationale": a.get("rationale", ""),
+            }
+            bucket = _ACTION_BUCKETS.get(item["action"])
+            if bucket == "reduce":
+                reduces.append(item)
+            elif bucket == "add":
+                adds.append(item)
+            else:
+                holds.append(item)
+
+    reduces.sort(key=lambda x: -(x["est_value"] or 0))
+    adds.sort(key=lambda x: -(x["size_pct"] or 0))
+
+    return templates.TemplateResponse(
+        _dummy_request(), "today.html",
+        {
+            "css": CSS,
+            "trade_date": trade_date,
+            "reduces": reduces,
+            "adds": adds,
+            "holds": holds,
+            "n_tickers": len({d["symbol"] for d in decisions}),
+        },
+    )
+
+
 @app.get("/decisions", response_class=HTMLResponse)
 def decisions_view():
     import json as _json
