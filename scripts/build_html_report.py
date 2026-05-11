@@ -284,12 +284,22 @@ def _shell(title: str, body: str, current: str = "") -> str:
 </html>"""
 
 
+_LIST_FIX_RE = re.compile(r"(\*\*[^\n*]+\*\*:)\n(-)")
+
+
 def render_markdown(md_text: str) -> str:
-    """MD → HTML with GitHub-style extensions."""
+    """MD → HTML with GitHub-style extensions.
+
+    Inserts a blank line between ``**Header**:`` paragraphs and a
+    following ``-`` bullet list so python-markdown doesn't collapse
+    the bullets into one <p> — older PM memos were written without
+    that blank line.
+    """
+    fixed = _LIST_FIX_RE.sub(r"\1\n\n\2", md_text or "")
     md = markdown.Markdown(
         extensions=["tables", "fenced_code", "sane_lists"],
     )
-    return md.convert(md_text)
+    return md.convert(fixed)
 
 
 def parse_money(s: str) -> float:

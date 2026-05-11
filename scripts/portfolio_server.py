@@ -43,6 +43,19 @@ from tradingagents.portfolio_db import (  # noqa: E402
 app = FastAPI(title="Portfolio Manager")
 
 
+# Decisions saved before schemas.py inserted a blank line after the
+# "Per-Account Actions" header would otherwise collapse the bullet block
+# into one <p>, since python-markdown requires a blank line between a
+# paragraph and a following ``-`` list. Insert it on render for back-compat.
+_LIST_FIX_RE = re.compile(r"(\*\*[^\n*]+\*\*:)\n(-)")
+
+
+def _render_pm_markdown(md_text: str) -> str:
+    import markdown as _md
+    fixed = _LIST_FIX_RE.sub(r"\1\n\n\2", md_text or "")
+    return _md.markdown(fixed, extensions=["tables", "fenced_code"])
+
+
 CSS = """
 :root {
     --fg:#1f2328; --fg-muted:#59636e; --bg:#fff; --bg-subtle:#f6f8fa;
@@ -1704,7 +1717,6 @@ def decisions_view():
 
 @app.get("/decisions/{ticker}", response_class=HTMLResponse)
 def decision_detail(ticker: str):
-    import markdown as _md
     with connect() as conn:
         row = conn.execute(
             "SELECT * FROM decisions WHERE symbol = ? ORDER BY trade_date DESC LIMIT 1",
@@ -1716,15 +1728,7 @@ def decision_detail(ticker: str):
             back_url="/decisions", back_label="回到评级列表",
         )
 
-    # Older decisions saved before schemas.py inserted a blank line after the
-    # "Per-Account Actions" header — without it, python-markdown collapses the
-    # bullet block into a single <p>. Insert it on render for backwards compat.
-    raw_md = re.sub(
-        r"(\*\*Per-Account Actions\*\*:)\n(-)",
-        r"\1\n\n\2",
-        row["final_decision"],
-    )
-    decision_html = _md.markdown(raw_md, extensions=["tables", "fenced_code"])
+    decision_html = _render_pm_markdown(row["final_decision"])
     return templates.TemplateResponse(
         _dummy_request(), "decision_detail.html",
         {
@@ -2238,11 +2242,9 @@ def run_result(run_id: str):
             back_url=f"/runs/{run_id}", back_label="查看日志",
         )
 
-    import markdown as _md
-
     report_path = out_dir / "REPORT.md"
     if report_path.exists():
-        report_html = _md.markdown(report_path.read_text(encoding="utf-8"), extensions=["tables", "fenced_code"])
+        report_html = _render_pm_markdown(report_path.read_text(encoding="utf-8"))
     else:
         report_html = "<p style='color:var(--fg-muted);'>REPORT.md not found in output dir.</p>"
 
