@@ -144,6 +144,17 @@ def init_db(db_path: Path | None = None) -> Path:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_lots_symbol ON cost_basis_lots (symbol)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_lots_account ON cost_basis_lots (account_id, symbol)")
 
+        # Migration: add sector/name/market_cap columns to tickers if missing
+        ticker_cols = {row["name"] for row in conn.execute("PRAGMA table_info(tickers)").fetchall()}
+        for col_name, col_type in [
+            ("name", "TEXT"),
+            ("sector", "TEXT"),
+            ("industry", "TEXT"),
+            ("market_cap", "REAL"),
+        ]:
+            if col_name not in ticker_cols:
+                conn.execute(f"ALTER TABLE tickers ADD COLUMN {col_name} {col_type}")
+
         if "owner" not in cols:
             conn.execute("ALTER TABLE positions_snapshot ADD COLUMN owner TEXT")
             # Best-effort backfill based on account_name patterns

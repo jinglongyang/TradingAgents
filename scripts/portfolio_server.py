@@ -310,6 +310,10 @@ def _render(message: str = ""):
           onsubmit="return confirm('从 yfinance 拉所有持仓 ticker 最新价格？1-2 分钟。')">
       <button class="secondary" type="submit">📡 更新价格</button>
     </form>
+    <form method="post" action="/enrich-tickers" style="display:inline;"
+          onsubmit="return confirm('为所有 ticker 拉 sector/name/市值（仅未填的）？慢，约 2-3 分钟。')">
+      <button class="secondary" type="submit">🏷️ 拉 ticker 元数据</button>
+    </form>
     <a class="btn secondary" href="/owners">👥 按 Owner 看</a>
     <a class="btn secondary" href="/drift">⚠️ Drift Alert</a>
     <a class="btn secondary" href="/tlh">💰 TLH Finder</a>
@@ -647,6 +651,59 @@ def delete_row(snapshot_id: int = Form(...)):
         conn.execute("DELETE FROM positions_snapshot WHERE snapshot_id = ?", (snapshot_id,))
         anchor = "acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", row["account_id"])
     return RedirectResponse(url=f"/#{anchor}", status_code=303)
+
+
+@app.post("/enrich-tickers")
+def enrich_tickers():
+    """Pull sector / industry / name / market_cap into tickers table from yfinance.
+
+    Slower than /update-prices (one .info call per ticker, no batch API) — run
+    occasionally to fill in metadata, then use /update-prices for daily price refresh.
+    """
+    import yfinance as _yf
+    from urllib.parse import quote as _quote
+
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT symbol FROM tickers WHERE sector IS NULL OR name IS NULL ORDER BY symbol"
+        ).fetchall()
+        targets = [r["symbol"] for r in rows]
+
+    if not targets:
+        return RedirectResponse(url="/?msg=" + _quote("所有 ticker 元数据已完整"), status_code=303)
+
+    updated = 0
+    failed: list[str] = []
+    with connect() as conn:
+        for sym in targets:
+            try:
+                info = _yf.Ticker(sym).info
+                conn.execute(
+                    """
+                    UPDATE tickers SET
+                        name = COALESCE(?, name),
+                        sector = COALESCE(?, sector),
+                        industry = COALESCE(?, industry),
+                        market_cap = COALESCE(?, market_cap)
+                    WHERE symbol = ?
+                    """,
+                    (
+                        info.get("longName") or info.get("shortName"),
+                        info.get("sector"),
+                        info.get("industry"),
+                        info.get("marketCap"),
+                        sym,
+                    ),
+                )
+                if conn.execute("SELECT changes()").fetchone()[0] > 0:
+                    updated += 1
+            except Exception:
+                failed.append(sym)
+
+    msg = f"✓ 拉了 {updated}/{len(targets)} ticker 元数据"
+    if failed:
+        msg += f" · 失败: {', '.join(failed[:8])}"
+    return RedirectResponse(url="/?msg=" + _quote(msg), status_code=303)
 
 
 @app.post("/update-prices")
@@ -1803,21 +1860,28 @@ def tickers_view():
         ).fetchall()}
 
     body = ['<h1>🗂️ Ticker Registry</h1>',
-            '<p class="subtitle">所有股票的权威价格表 — positions_snapshot 引用这里。点 📡 更新价格 同步。</p>',
+            '<p class="subtitle">所有股票的权威价格表 + 元数据 — positions_snapshot 引用这里。</p>',
             '<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>']
     if not rows:
         body.append('<p style="color:var(--fg-muted);">还没有 ticker 记录 — 点主页 📡 更新价格 初始化。</p>')
     else:
-        body.append(f'<div class="status">📊 <strong>{len(rows)}</strong> 个 ticker · 在 <strong>{sum(ref_counts.values())}</strong> 行 positions 中被引用</div>')
-        body.append('<table><thead><tr><th>Ticker</th><th class="num">最新价</th><th class="num">引用行数</th><th>最近更新</th></tr></thead><tbody>')
+        n_with_meta = sum(1 for r in rows if r["sector"])
+        body.append(f'<div class="status">📊 <strong>{len(rows)}</strong> 个 ticker · 在 <strong>{sum(ref_counts.values())}</strong> 行 positions 中被引用 · <strong>{n_with_meta}</strong> 个有元数据</div>')
+        body.append('<table><thead><tr><th>Ticker</th><th>公司</th><th>Sector</th><th>Industry</th><th class="num">最新价</th><th class="num">市值</th><th class="num">引用</th><th>更新</th></tr></thead><tbody>')
         for r in rows:
             n_refs = ref_counts.get(r["symbol"], 0)
             price = f"${r['last_price']:.2f}" if r["last_price"] else "—"
+            cap = f"${r['market_cap']/1e9:.1f}B" if r["market_cap"] else "—"
+            name = (r["name"] or "")[:32]
             body.append(
                 f'<tr><td><strong><a href="/lookup?q={r["symbol"]}">{r["symbol"]}</a></strong></td>'
+                f'<td style="font-size:12px;">{name}</td>'
+                f'<td style="font-size:12px;color:var(--fg-muted);">{r["sector"] or "—"}</td>'
+                f'<td style="font-size:12px;color:var(--fg-muted);">{(r["industry"] or "—")[:24]}</td>'
                 f'<td class="num">{price}</td>'
+                f'<td class="num">{cap}</td>'
                 f'<td class="num">{n_refs}</td>'
-                f'<td style="font-size:12px;color:var(--fg-muted);">{r["last_updated"] or "—"}</td></tr>'
+                f'<td style="font-size:11px;color:var(--fg-muted);">{(r["last_updated"] or "—")[:10]}</td></tr>'
             )
         body.append('</tbody></table>')
 
