@@ -1,9 +1,13 @@
 # LLM Clients - Consistency Improvements
 
-## Issues to Fix
+All known issues fixed.
 
-### 1. `validate_model()` is never called
-- Add validation call in `get_llm()` with warning (not error) for unknown models
+## History
+
+### 1. ~~`validate_model()` is never called~~ (Fixed)
+- `BaseLLMClient.warn_if_unknown_model()` is invoked at the top of each
+  client's `get_llm()`; emits a `RuntimeWarning` for unknown models and
+  continues. openrouter/ollama always pass.
 
 ### 2. ~~Inconsistent parameter handling~~ (Fixed)
 - GoogleClient now accepts unified `api_key` and maps it to `google_api_key`
