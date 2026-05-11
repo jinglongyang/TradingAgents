@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}{{ ticker }} — PM 分析{% endblock %}
+{% block extra_head %}
+<style>
+.markdown { background: var(--bg-subtle); padding: 24px; border-radius: 8px; border: 1px solid var(--border); }
+.markdown h2 { color: var(--fg); margin-top: 24px; font-size: 18px; }
+.markdown strong { color: var(--fg); }
+.markdown table { width: 100%; margin: 16px 0; }
+.rating-tagline { color: var(--fg-muted); font-size: 14px; margin-top: -4px; margin-bottom: 8px; }
+</style>
+{% endblock %}
+
+{% block content %}
+  <h1>
+    {{ ticker }}
+    <span class="tag tag-{{ rating|lower }}" style="padding:4px 12px;font-size:14px;margin-left:8px;">{{ rating }}</span>
+  </h1>
+  <p class="rating-tagline">{{ rating_tagline }}</p>
+  <p class="subtitle">分析日期: {{ trade_date }} · 录入时间: {{ created_at }}</p>
+  <div style="margin-bottom:16px;">
+    <a class="btn secondary" href="/decisions">← 回到所有评级</a>
+    <a class="btn secondary" href="/">← 持仓页</a>
+  </div>
+
+  {% include "_rating_glossary.html" %}
+
+  <div class="markdown">{{ decision_html|safe }}</div>
+{% endblock %}

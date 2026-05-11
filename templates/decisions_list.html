@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}PM 分析 — Portfolio Manager{% endblock %}
+
+{% block content %}
+  <h1>📋 PM 分析 & 评级</h1>
+  <p class="subtitle">{{ rows|length }} 个 ticker · 最新分析按 ticker 自动汇总</p>
+
+  <div class="status">
+    {% for rating in rating_order %}
+      {% if counts[rating] %}
+        <span class="tag tag-{{ rating|lower }}" style="padding:4px 10px;font-size:12px;margin-right:6px">
+          {{ rating }}: {{ counts[rating] }}
+        </span>
+      {% endif %}
+    {% endfor %}
+  </div>
+
+  {% include "_rating_glossary.html" %}
+
+  <div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 回到持仓</a></div>
+
+  <table style="background:var(--bg-subtle);border-radius:8px;border:1px solid var(--border);overflow:hidden;">
+    <thead>
+      <tr>
+        <th>Ticker</th><th>评级</th><th>分析日期</th>
+        <th class="num">账户级动作</th><th>反思（如有）</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td><strong>{{ r.symbol }}</strong></td>
+        <td><span class="tag tag-{{ r.rating|lower }}" style="padding:3px 10px;">{{ r.rating }}</span></td>
+        <td>{{ r.trade_date }}</td>
+        <td class="num">{{ r.n_actions }} actions ({{ r.n_total }} accts)</td>
+        <td style="color:var(--fg-muted);font-size:12px;">{{ r.reflection[:80] }}</td>
+        <td><a href="/decisions/{{ r.symbol }}" class="btn small secondary">详情</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endblock %}

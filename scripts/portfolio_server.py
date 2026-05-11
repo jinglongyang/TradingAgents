@@ -1806,82 +1806,49 @@ def owners_view():
     )
 
 
+_RATING_ORDER = ["Buy", "Overweight", "Hold", "Underweight", "Sell"]
+_RATING_RANK = {r: i for i, r in enumerate(_RATING_ORDER)}
+_RATING_TAGLINE = {
+    "Buy": "强烈看多 — 基本面+趋势+估值全部支持，建议大幅加仓",
+    "Overweight": "超配 — 看多但克制，组合权重应高于基准（SPY 指数权重）",
+    "Hold": "持有 — 中性，基本面 OK 但当前不是好的进场点",
+    "Underweight": "低配 — 看空但不清仓，组合权重应低于基准，建议部分减仓",
+    "Sell": "强烈看空 — 基本面恶化或重大风险，建议清仓",
+}
+
+
 @app.get("/decisions", response_class=HTMLResponse)
 def decisions_view():
     import json as _json
     with connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM decisions ORDER BY rating, symbol"
-        ).fetchall()
+        raw = conn.execute("SELECT * FROM decisions ORDER BY rating, symbol").fetchall()
 
-    RATING_ORDER = {"Buy": 0, "Overweight": 1, "Hold": 2, "Underweight": 3, "Sell": 4}
-    rows_sorted = sorted(rows, key=lambda r: (RATING_ORDER.get(r["rating"], 99), r["symbol"]))
-
-    counts = {}
-    for r in rows:
+    counts: dict[str, int] = {r: 0 for r in _RATING_ORDER}
+    rows = []
+    for r in raw:
         counts[r["rating"]] = counts.get(r["rating"], 0) + 1
-    chips = " ".join(
-        f'<span class="tag tag-{r.lower()}" style="padding:4px 10px;font-size:12px;margin-right:6px">{r}: {counts.get(r,0)}</span>'
-        for r in ["Buy", "Overweight", "Hold", "Underweight", "Sell"] if counts.get(r, 0)
-    )
-
-    glossary = """
-<details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-bottom:16px;border:1px solid var(--border);">
-<summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 评级说明（点击展开）</summary>
-<table style="margin-top:12px;font-size:13px;">
-<thead><tr><th>评级</th><th>中文</th><th>含义</th><th>典型动作</th></tr></thead>
-<tbody>
-<tr><td><span class="tag tag-buy" style="padding:2px 8px;">Buy</span></td><td>买入</td><td>强烈看多。基本面+趋势+估值全部支持</td><td>大幅加仓 / 新开仓</td></tr>
-<tr><td><span class="tag tag-overweight" style="padding:2px 8px;">Overweight</span></td><td><strong>超配</strong></td><td>看多但克制。该股<strong>组合权重应高于基准（如 SPY 指数）</strong>，但估值/技术不支持激进追价</td><td>持有 + 回调小幅加仓</td></tr>
-<tr><td><span class="tag tag-hold" style="padding:2px 8px;">Hold</span></td><td>持有</td><td>中性。基本面 OK 但当前不是好的进场点</td><td>已持不动，新资金等待</td></tr>
-<tr><td><span class="tag tag-underweight" style="padding:2px 8px;">Underweight</span></td><td><strong>低配</strong></td><td>看空但不清仓。该股<strong>组合权重应低于基准</strong>，建议部分减仓</td><td>分批减 20-35% / 反弹时卖</td></tr>
-<tr><td><span class="tag tag-sell" style="padding:2px 8px;">Sell</span></td><td>卖出</td><td>强烈看空。基本面恶化或重大风险</td><td>清仓 100%（应税账户做 TLH）</td></tr>
-</tbody>
-</table>
-<p style="margin-top:8px;font-size:12px;color:var(--fg-muted);">
-<strong>关键区分</strong>：Overweight ≠ Buy（强度不同）· Underweight ≠ Sell（保留部分 vs 全清）· "基准权重" 通常指 SPY 指数里该股的权重
-</p>
-</details>
-"""
-
-    body = [f'<h1>📋 PM 分析 & 评级</h1><p class="subtitle">{len(rows)} 个 ticker · 最新分析按 ticker 自动汇总</p>',
-            f'<div class="status">{chips}</div>',
-            glossary,
-            '<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 回到持仓</a></div>',
-            '<table style="background:var(--bg-subtle);border-radius:8px;border:1px solid var(--border);overflow:hidden;">',
-            '<thead><tr><th>Ticker</th><th>评级</th><th>分析日期</th><th class="num">账户级动作</th><th>反思（如有）</th><th></th></tr></thead>',
-            '<tbody>']
-    for r in rows_sorted:
         actions = _json.loads(r["account_actions"]) if r["account_actions"] else []
-        n_act = sum(1 for a in actions if a.get("action") not in (None, "Hold"))
-        reflection = (r["reflection"] or "")[:80]
-        body.append(
-            f'<tr>'
-            f'<td><strong>{r["symbol"]}</strong></td>'
-            f'<td><span class="tag tag-{r["rating"].lower()}" style="padding:3px 10px;">{r["rating"]}</span></td>'
-            f'<td>{r["trade_date"]}</td>'
-            f'<td class="num">{n_act} actions ({len(actions)} accts)</td>'
-            f'<td style="color:var(--fg-muted);font-size:12px;">{reflection}</td>'
-            f'<td><a href="/decisions/{r["symbol"]}" class="btn small secondary">详情</a></td>'
-            f'</tr>'
-        )
-    body.append('</tbody></table>')
+        rows.append({
+            "symbol": r["symbol"],
+            "rating": r["rating"],
+            "trade_date": r["trade_date"],
+            "n_total": len(actions),
+            "n_actions": sum(1 for a in actions if a.get("action") not in (None, "Hold")),
+            "reflection": r["reflection"] or "",
+        })
+    rows.sort(key=lambda r: (_RATING_RANK.get(r["rating"], 99), r["symbol"]))
 
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PM 分析 — Portfolio Manager</title><style>{CSS}
-.tag-buy {{ background: color-mix(in srgb, var(--success) 30%, transparent); color: var(--success); }}
-.tag-overweight {{ background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); }}
-.tag-hold {{ background: var(--border); color: var(--fg-muted); }}
-.tag-underweight {{ background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }}
-.tag-sell {{ background: color-mix(in srgb, var(--danger) 30%, transparent); color: var(--danger); }}
-</style></head><body><div class="container">
-{''.join(body)}
-</div></body></html>"""
+    return templates.TemplateResponse(
+        _dummy_request(), "decisions_list.html",
+        {
+            "css": CSS, "rows": rows,
+            "rating_order": _RATING_ORDER, "counts": counts,
+        },
+    )
 
 
 @app.get("/decisions/{ticker}", response_class=HTMLResponse)
 def decision_detail(ticker: str):
-    import json as _json
     import markdown as _md
     with connect() as conn:
         row = conn.execute(
@@ -1892,55 +1859,17 @@ def decision_detail(ticker: str):
         return HTMLResponse(f"<p>No decision for {ticker}</p><a href='/decisions'>← Back</a>")
 
     decision_html = _md.markdown(row["final_decision"], extensions=["tables", "fenced_code"])
-
-    rating_tagline = {
-        "Buy": "强烈看多 — 基本面+趋势+估值全部支持，建议大幅加仓",
-        "Overweight": "超配 — 看多但克制，组合权重应高于基准（SPY 指数权重）",
-        "Hold": "持有 — 中性，基本面 OK 但当前不是好的进场点",
-        "Underweight": "低配 — 看空但不清仓，组合权重应低于基准，建议部分减仓",
-        "Sell": "强烈看空 — 基本面恶化或重大风险，建议清仓",
-    }.get(row["rating"], "")
-
-    glossary_html = """
-<details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-bottom:16px;border:1px solid var(--border);">
-<summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 5 档评级体系完整说明</summary>
-<table style="margin-top:12px;font-size:13px;">
-<thead><tr><th>评级</th><th>含义</th><th>典型动作</th></tr></thead>
-<tbody>
-<tr><td><span class="tag tag-buy" style="padding:2px 8px;">Buy</span></td><td>强烈看多</td><td>大幅加仓 / 新开仓</td></tr>
-<tr><td><span class="tag tag-overweight" style="padding:2px 8px;">Overweight</span></td><td><strong>超配</strong>：权重高于基准但不激进追价</td><td>持有 + 回调小幅加</td></tr>
-<tr><td><span class="tag tag-hold" style="padding:2px 8px;">Hold</span></td><td>中性持有</td><td>已持不动</td></tr>
-<tr><td><span class="tag tag-underweight" style="padding:2px 8px;">Underweight</span></td><td><strong>低配</strong>：权重低于基准但保留部分</td><td>分批减仓 20-35%</td></tr>
-<tr><td><span class="tag tag-sell" style="padding:2px 8px;">Sell</span></td><td>强烈看空</td><td>清仓（应税户做 TLH）</td></tr>
-</tbody>
-</table>
-<p style="margin-top:8px;font-size:12px;color:var(--fg-muted);">
-<strong>关键区分</strong>：Overweight ≠ Buy（强度）· Underweight ≠ Sell（保留 vs 全清）· "基准权重" ≈ SPY 指数权重
-</p>
-</details>
-"""
-
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{ticker} — PM 分析</title><style>{CSS}
-table {{ background: var(--bg-subtle); border-radius: 6px; }}
-.markdown {{ background: var(--bg-subtle); padding: 24px; border-radius: 8px; border: 1px solid var(--border); }}
-.markdown h2 {{ color: var(--fg); margin-top: 24px; font-size: 18px; }}
-.markdown strong {{ color: var(--fg); }}
-.markdown table {{ width: 100%; margin: 16px 0; }}
-.tag-buy {{ background: color-mix(in srgb, var(--success) 30%, transparent); color: var(--success); }}
-.tag-overweight {{ background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); }}
-.tag-hold {{ background: var(--border); color: var(--fg-muted); }}
-.tag-underweight {{ background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }}
-.tag-sell {{ background: color-mix(in srgb, var(--danger) 30%, transparent); color: var(--danger); }}
-.rating-tagline {{ color: var(--fg-muted); font-size: 14px; margin-top: -4px; margin-bottom: 8px; }}
-</style></head><body><div class="container">
-<h1>{ticker} <span class="tag tag-{row['rating'].lower()}" style="padding:4px 12px;font-size:14px;margin-left:8px;">{row['rating']}</span></h1>
-<p class="rating-tagline">{rating_tagline}</p>
-<p class="subtitle">分析日期: {row['trade_date']} · 录入时间: {row['created_at']}</p>
-<div style="margin-bottom:16px;"><a class="btn secondary" href="/decisions">← 回到所有评级</a> <a class="btn secondary" href="/">← 持仓页</a></div>
-{glossary_html}
-<div class="markdown">{decision_html}</div>
-</div></body></html>"""
+    return templates.TemplateResponse(
+        _dummy_request(), "decision_detail.html",
+        {
+            "css": CSS, "ticker": ticker,
+            "rating": row["rating"],
+            "rating_tagline": _RATING_TAGLINE.get(row["rating"], ""),
+            "trade_date": row["trade_date"],
+            "created_at": row["created_at"],
+            "decision_html": decision_html,
+        },
+    )
 
 
 @app.get("/executions", response_class=HTMLResponse)
