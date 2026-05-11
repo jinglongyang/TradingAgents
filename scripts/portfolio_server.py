@@ -194,9 +194,13 @@ def _build_holdings_view():
     with connect() as conn:
         rows = conn.execute(
             """
-            SELECT * FROM positions_snapshot
-            WHERE import_date = ?
-            ORDER BY account_name, symbol
+            SELECT p.*,
+                   COALESCE(t.last_price, p.last_price) AS authoritative_price,
+                   COALESCE(t.last_price, p.last_price) * p.quantity AS authoritative_value
+            FROM positions_snapshot p
+            LEFT JOIN tickers t ON t.symbol = p.symbol
+            WHERE p.import_date = ?
+            ORDER BY p.account_name, p.symbol
             """,
             (latest,) if latest else (today,),
         ).fetchall()
@@ -204,6 +208,13 @@ def _build_holdings_view():
     if not rows:
         return '<p style="color:var(--fg-muted);">DB 暂时为空 — 点 "添加持仓" 开始</p>', 0, 0.0
 
+    # Convert rows so that downstream code reading r["last_price"] /
+    # r["current_value"] transparently gets the canonical tickers price.
+    rows = [
+        {**dict(r), "last_price": r["authoritative_price"] or 0,
+         "current_value": r["authoritative_value"] or 0}
+        for r in rows
+    ]
     # Group by account
     by_account: dict[tuple[str, str], list] = {}
     for r in rows:
@@ -750,9 +761,16 @@ def edit(
     redirect_anchor: str = Form(""),
 ):
     try:
+        from datetime import datetime as _dt
         price = last_price or 0.0
         cost = cost_basis_total or 0.0
         with connect() as conn:
+            # First fetch the row's symbol so we can update tickers too
+            existing = conn.execute(
+                "SELECT symbol, account_id FROM positions_snapshot WHERE snapshot_id = ?",
+                (snapshot_id,),
+            ).fetchone()
+            sym = existing["symbol"] if existing else None
             conn.execute(
                 """
                 UPDATE positions_snapshot
@@ -764,7 +782,28 @@ def edit(
                 (quantity, price, price * quantity if price else cost,
                  cost, cost / quantity if quantity else 0.0, broker, snapshot_id),
             )
-            row = conn.execute("SELECT account_id FROM positions_snapshot WHERE snapshot_id = ?", (snapshot_id,)).fetchone()
+            # If user provided a price, propagate to the canonical tickers table
+            # and sync every other row holding the same symbol so all accounts agree.
+            if sym and price > 0:
+                conn.execute(
+                    """
+                    INSERT INTO tickers (symbol, last_price, last_updated)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(symbol) DO UPDATE SET
+                        last_price = excluded.last_price,
+                        last_updated = excluded.last_updated
+                    """,
+                    (sym, price, _dt.now().isoformat(timespec="seconds")),
+                )
+                conn.execute(
+                    """
+                    UPDATE positions_snapshot
+                    SET last_price = ?, current_value = ? * quantity
+                    WHERE symbol = ? AND snapshot_id != ?
+                    """,
+                    (price, price, sym, snapshot_id),
+                )
+            row = existing
         # Always derive from account_id, ignore stale redirect_anchor
         anchor = ("acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", row["account_id"])) if row else ""
         return RedirectResponse(url=f"/#{anchor}" if anchor else "/", status_code=303)
