@@ -111,6 +111,20 @@ def init_db(db_path: Path | None = None) -> Path:
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(positions_snapshot)").fetchall()}
         if "broker" not in cols:
             conn.execute("ALTER TABLE positions_snapshot ADD COLUMN broker TEXT")
-            # Backfill: existing Fidelity-imported rows
             conn.execute("UPDATE positions_snapshot SET broker = 'Fidelity' WHERE broker IS NULL")
+        if "owner" not in cols:
+            conn.execute("ALTER TABLE positions_snapshot ADD COLUMN owner TEXT")
+            # Best-effort backfill based on account_name patterns
+            for pattern, owner in [
+                ("%Olivia%", "Olivia"),
+                ("%Amelia%", "Amelia"),
+                ("%Meimei%", "Meimei"),
+                ("%Joint%", "Joint"),
+                ("%-SF%", "Spouse"),
+            ]:
+                conn.execute(
+                    "UPDATE positions_snapshot SET owner = ? WHERE owner IS NULL AND account_name LIKE ?",
+                    (owner, pattern),
+                )
+            conn.execute("UPDATE positions_snapshot SET owner = 'Self' WHERE owner IS NULL")
     return path

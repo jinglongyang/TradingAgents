@@ -110,11 +110,12 @@ function openSell(sym, acctId, acctName, qty) {
     document.getElementById('sell-title').textContent = `Sell ${sym} from ${acctName}`;
     openModal('sell-modal');
 }
-function openAccountEdit(acctId, acctName, currentBroker, currentType) {
+function openAccountEdit(acctId, acctName, currentBroker, currentType, currentOwner) {
     document.getElementById('acct-edit-id').value = acctId;
     document.getElementById('acct-edit-name-input').value = acctName;
     document.getElementById('acct-edit-broker-select').value = currentBroker || 'Fidelity';
     document.getElementById('acct-edit-type-select').value = currentType || 'Taxable';
+    document.getElementById('acct-edit-owner-input').value = currentOwner || 'Self';
     document.getElementById('acct-edit-title').textContent = `编辑账户: ${acctName}`;
     openModal('acct-edit-modal');
 }
@@ -160,15 +161,17 @@ def _build_holdings_view():
         total += sub
         atype = items[0]["account_type"]
         broker = items[0]["broker"] or "—"
+        owner = items[0]["owner"] or "—"
         out.append(f'''
 <div class="account">
   <div class="account-header">
     <div>
+      <button class="small secondary" onclick="openAccountEdit('{aid}', `{aname}`, '{broker}', '{atype}', '{owner}')"
+              style="margin-right:8px;padding:2px 8px;font-size:11px;">✎ 编辑账户</button>
       <span class="account-name">{aname}</span>
       <span class="tag tag-{atype.lower()}">{atype}</span>
-      <span class="tag" style="margin-left:4px;font-size:10px;background:var(--bg);border:1px solid var(--border);cursor:pointer;"
-            onclick="openAccountEdit('{aid}', `{aname}`, '{broker}', '{atype}')"
-            title="点击修改本账户所有持仓的名字、broker、类型">🏦 {broker} ✎</span>
+      <span class="tag" style="margin-left:4px;font-size:10px;background:var(--bg);border:1px solid var(--border);">🏦 {broker}</span>
+      <span class="tag" style="margin-left:4px;font-size:10px;background:var(--bg);border:1px solid var(--border);">👤 {owner}</span>
     </div>
     <div class="account-meta">{len(items)} 仓位 · ${sub:,.0f}</div>
   </div>
@@ -237,6 +240,10 @@ def _render(message: str = ""):
       <div class="row">
         <div class="field"><label>账户 ID <span class="hint">如 RH-IND</span></label><input name="account_id" required></div>
         <div class="field"><label>账户名</label><input name="account_name" required></div>
+      </div>
+      <div class="field">
+        <label>Owner <span class="hint">Self / Spouse / Joint / Olivia / Amelia / ...</span></label>
+        <input name="owner" value="Self" required>
       </div>
       <div class="row">
         <div class="field">
@@ -311,6 +318,10 @@ def _render(message: str = ""):
       <div class="field">
         <label>账户名 <span class="hint">如 "Merrill CMA" / "Robinhood 个人户"</span></label>
         <input id="acct-edit-name-input" name="account_name" required>
+      </div>
+      <div class="field">
+        <label>Owner / 所有者 <span class="hint">如 Self / Spouse / Joint / Olivia / Amelia</span></label>
+        <input id="acct-edit-owner-input" name="owner" placeholder="Self / Spouse / Joint / Child name" required>
       </div>
       <div class="row">
         <div class="field">
@@ -396,19 +407,26 @@ def add(
     account_name: str = Form(...),
     account_type: str = Form("Taxable"),
     broker: str = Form("Robinhood"),
+    owner: str = Form("Self"),
     symbol: str = Form(...),
     quantity: float = Form(...),
     last_price: Optional[float] = Form(None),
     cost_basis_total: Optional[float] = Form(None),
 ):
     try:
-        add_position(
+        snap_id = add_position(
             account_id=account_id.strip(), account_name=account_name.strip(),
             account_type=account_type, symbol=symbol.strip().upper(),
             quantity=quantity, last_price=last_price or 0.0,
             cost_basis_total=cost_basis_total or 0.0,
             broker=broker,
         )
+        # add_position returns count, but we need to set owner too. Update by account_id.
+        with connect() as conn:
+            conn.execute(
+                "UPDATE positions_snapshot SET owner = ? WHERE account_id = ? AND owner IS NULL",
+                (owner.strip(), account_id.strip()),
+            )
         msg = f'<div class="msg success">✓ 已添加 <strong>{symbol.upper()}</strong> 到 {account_name}</div>'
     except Exception as e:  # noqa: BLE001
         msg = f'<div class="msg error">✗ 错误: {e}</div>'
@@ -421,22 +439,23 @@ def account_edit(
     account_name: str = Form(...),
     account_type: str = Form(...),
     broker: str = Form(...),
+    owner: str = Form(...),
 ):
-    """Update account_name, account_type, and broker on every row of this account."""
+    """Update account_name, account_type, broker, owner on every row of this account."""
     try:
         with connect() as conn:
             cur = conn.execute(
                 """
                 UPDATE positions_snapshot
-                SET account_name = ?, account_type = ?, broker = ?
+                SET account_name = ?, account_type = ?, broker = ?, owner = ?
                 WHERE account_id = ?
                 """,
-                (account_name.strip(), account_type, broker, account_id),
+                (account_name.strip(), account_type, broker, owner.strip(), account_id),
             )
             n = cur.rowcount
         msg = (
             f'<div class="msg success">✓ 已更新 <strong>{n}</strong> 行 '
-            f'(name=<strong>{account_name}</strong>, type={account_type}, broker={broker})</div>'
+            f'(name=<strong>{account_name}</strong>, owner={owner}, type={account_type}, broker={broker})</div>'
         )
     except Exception as e:  # noqa: BLE001
         msg = f'<div class="msg error">✗ 错误: {e}</div>'
