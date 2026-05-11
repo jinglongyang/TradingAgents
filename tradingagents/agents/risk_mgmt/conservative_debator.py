@@ -31,9 +31,9 @@ Here is the current conversation history: {history} Here is the last response fr
 
 Engage by questioning their optimism and emphasizing the potential downsides they may have overlooked. Address each of their counterpoints to showcase why a conservative stance is ultimately the safest path for the firm's assets. Focus on debating and critiquing their arguments to demonstrate the strength of a low-risk strategy over their approaches. Output conversationally as if you are speaking without any special formatting.""" + get_language_instruction()
 
-        from tradingagents.agents.utils.agent_utils import NEUTRAL_LANGUAGE_DISCIPLINE
+        from tradingagents.agents.utils.agent_utils import NEUTRAL_LANGUAGE_DISCIPLINE, safe_invoke
         prompt = prompt + NEUTRAL_LANGUAGE_DISCIPLINE
-        response = llm.invoke(prompt)
+        response = safe_invoke(llm, prompt, agent_label="Conservative Analyst")
 
         argument = f"Conservative Analyst: {response.content}"
 

@@ -34,6 +34,58 @@ NEUTRAL_LANGUAGE_DISCIPLINE = (
 )
 
 
+_STRONGER_NEUTRAL = (
+    "\n\nIMPORTANT: A previous attempt was blocked by the content filter. "
+    "Rewrite using ONLY sell-side research vocabulary. Avoid hostile or "
+    "catastrophic framing entirely. Describe risks in terms of: margin compression, "
+    "competitive pressure, demand softness, capital intensity, execution risk, "
+    "guidance reset, multiple compression. Do NOT use words like: bankruptcy, "
+    "crisis, collapse, doomed, dying, crash, fatal, hemorrhage, destruction, "
+    "implode, meltdown. Substitute industry-standard analyst phrasing throughout."
+)
+
+
+def safe_invoke(llm, prompt: str, agent_label: str = "agent", max_retries: int = 1):
+    """Invoke an LLM with graceful degradation when an Azure / OpenAI content
+    filter rejects the response.
+
+    1. Try the prompt as-is.
+    2. On a ValueError mentioning "content filter", retry with an additional
+       stronger neutral-language preamble.
+    3. If retries are exhausted, return a stub response so downstream nodes can
+       continue instead of crashing the whole analysis. The stub is structured
+       like the original LLM response (object with `.content`).
+    """
+    import logging as _logging
+    log = _logging.getLogger("safe_invoke")
+
+    attempt_prompt = prompt
+    last_err: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return llm.invoke(attempt_prompt)
+        except ValueError as e:
+            msg = str(e).lower()
+            if "content filter" not in msg and "responsibleaipolicy" not in msg:
+                raise
+            last_err = e
+            log.warning(
+                "[%s] content filter tripped (attempt %d/%d); retrying with stronger discipline",
+                agent_label, attempt + 1, max_retries + 1,
+            )
+            attempt_prompt = prompt + _STRONGER_NEUTRAL
+
+    log.error("[%s] content filter still blocking after %d attempts — returning stub", agent_label, max_retries + 1)
+
+    class _StubResponse:
+        content = (
+            f"[{agent_label} unavailable: Azure content filter blocked output for this ticker. "
+            "Downstream agents should proceed without this perspective.]"
+        )
+
+    return _StubResponse()
+
+
 def get_language_instruction() -> str:
     """Return a prompt instruction for the configured output language.
 

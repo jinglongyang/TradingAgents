@@ -32,9 +32,9 @@ Last bear argument: {current_response}
 Use this information to deliver a compelling bull argument, refute the bear's concerns, and engage in a dynamic debate that demonstrates the strengths of the bull position.
 """ + get_language_instruction()
 
-        from tradingagents.agents.utils.agent_utils import NEUTRAL_LANGUAGE_DISCIPLINE
+        from tradingagents.agents.utils.agent_utils import NEUTRAL_LANGUAGE_DISCIPLINE, safe_invoke
         prompt = prompt + NEUTRAL_LANGUAGE_DISCIPLINE
-        response = llm.invoke(prompt)
+        response = safe_invoke(llm, prompt, agent_label="Bull Researcher")
 
         argument = f"Bull Analyst: {response.content}"
 
