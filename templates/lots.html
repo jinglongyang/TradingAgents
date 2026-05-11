@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Cost Basis Lots{% endblock %}
+
+{% block content %}
+  <h1>📦 Cost Basis Lots</h1>
+  <p class="subtitle">每笔买入独立追踪 → 支持 FIFO / LIFO / specific-lot 卖出策略</p>
+  <div style="margin-bottom:16px;">
+    <a class="btn secondary" href="/">← 持仓</a>
+    <button onclick="openModal('add-lot-modal')">➕ 添加 Lot</button>
+  </div>
+
+  {% if not groups %}
+    <p style="color:var(--fg-muted);padding:20px;background:var(--bg-subtle);border-radius:8px;">
+      还没有 lot 记录。点 "添加 Lot" 录入买入历史；以后所有买入都会出现在这里。
+    </p>
+  {% else %}
+    {% for g in groups %}
+    <h3 style="margin-top:24px;">{{ g.symbol }} · {{ "%.3f"|format(g.total_shares) }} 股 · 总成本 ${{ "{:,.0f}".format(g.total_cost) }}</h3>
+    <table>
+      <thead><tr>
+        <th>买入日期</th><th>持有天数</th><th>持有期</th><th>账户</th>
+        <th class="num">股数</th><th class="num">单价</th><th class="num">小计</th><th>备注</th>
+      </tr></thead>
+      <tbody>
+        {% for l in g.lots %}
+        <tr>
+          <td>{{ l.purchase_date }}</td>
+          <td class="num">{{ l.days_held }}</td>
+          <td>{{ l.term }}</td>
+          <td>{{ l.account_name }}</td>
+          <td class="num">{{ "%.3f"|format(l.shares) }}</td>
+          <td class="num">${{ "%.2f"|format(l.cost_per_share) }}</td>
+          <td class="num">${{ "{:,.0f}".format(l.subtotal) }}</td>
+          <td style="font-size:12px;color:var(--fg-muted);">{{ l.note or "" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endfor %}
+  {% endif %}
+
+  <div class="modal-backdrop" id="add-lot-modal">
+    <div class="modal">
+      <h3>添加 Cost Basis Lot</h3>
+      <form method="post" action="/lots/add">
+        <div class="row">
+          <div class="field"><label>买入日期</label><input name="purchase_date" type="date" required></div>
+          <div class="field"><label>Ticker</label><input name="symbol" required style="text-transform:uppercase"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>账户名</label><input name="account_name" required></div>
+          <div class="field"><label>Account ID</label><input name="account_id" required></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>股数</label><input name="shares" type="number" step="0.001" required></div>
+          <div class="field"><label>单价（每股）</label><input name="cost_per_share" type="number" step="0.01" required></div>
+        </div>
+        <div class="field"><label>备注</label><input name="note" placeholder="可选"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+          <button type="button" class="secondary" onclick="closeModal('add-lot-modal')">取消</button>
+          <button type="submit" class="success">添加</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function openModal(id) { document.getElementById(id).classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+</script>
+{% endblock %}

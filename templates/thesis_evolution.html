@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Thesis 演变{% endblock %}
+
+{% block content %}
+  <h1>📈 Thesis 演变跟踪</h1>
+  <p class="subtitle">同 ticker 跨多次分析的评级变化 — 看 PM 自己判断稳定性</p>
+  <div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>
+
+  <div class="status">
+    📊 {{ n_total }} 个 ticker ·
+    <strong>{{ rows|length }}</strong> 个有多次分析 ·
+    <strong>{{ n_stable }}</strong> 个仅 1 次
+  </div>
+
+  {% if rows %}
+    <h2 style="margin-top:24px;">🔄 评级演变（≥ 2 次分析）</h2>
+    <table>
+      <thead><tr><th>Ticker</th><th>评级序列（旧→新）</th><th>PT 序列</th><th>稳定性</th></tr></thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td><strong><a href="/decisions/{{ r.symbol }}">{{ r.symbol }}</a></strong></td>
+          <td>
+            {% for rt in r.rating_seq %}
+              <span class="tag tag-{{ rt|lower }}" style="padding:2px 8px;font-size:11px;">{{ rt }}</span>
+              {% if not loop.last %}→{% endif %}
+            {% endfor %}
+          </td>
+          <td style="font-size:12px;">{{ r.pt_seq|join(" → ") }}</td>
+          <td>{{ r.stability }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p style="color:var(--fg-muted);">还没有 ticker 被多次分析过。每次重跑分析后这里会自动出现演变。</p>
+  {% endif %}
+
+  <details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-top:24px;border:1px solid var(--border);">
+    <summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 为什么 thesis 演变重要</summary>
+    <ul style="margin-top:12px;font-size:13px;line-height:1.7;">
+      <li><strong>判断稳定性</strong>：同 ticker 跨多次分析的评级应该相对稳定 — 大幅翻转（Buy → Sell）需要新事件来 justify。</li>
+      <li><strong>检测 model drift</strong>：如果 PM 在没有新事实的情况下改变立场，可能是 LLM 抽奖性而非真判断。</li>
+      <li><strong>历史成本基础</strong>：未来 6-12 个月，你能看到"我 5 月给 NVDA Overweight，10 月还是 Overweight，2027 年 1 月变 Hold" — 这种演变本身是有意义的信号。</li>
+      <li><strong>学习数据</strong>：评级变化 + 实际 alpha = PM 的真实命中率（详见 /runs 反向验证）</li>
+    </ul>
+  </details>
+{% endblock %}

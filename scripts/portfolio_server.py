@@ -782,88 +782,42 @@ def lots_view(symbol: str = ""):
     """Cost-basis lot ledger — each purchase tracked individually."""
     with connect() as conn:
         if symbol:
-            rows = conn.execute(
+            raw = conn.execute(
                 "SELECT * FROM cost_basis_lots WHERE symbol = ? ORDER BY purchase_date",
                 (symbol.upper(),),
             ).fetchall()
         else:
-            rows = conn.execute(
+            raw = conn.execute(
                 "SELECT * FROM cost_basis_lots ORDER BY purchase_date DESC LIMIT 200"
             ).fetchall()
 
-    body = ['<h1>📦 Cost Basis Lots</h1>',
-            '<p class="subtitle">每笔买入独立追踪 → 支持 FIFO / LIFO / specific-lot 卖出策略</p>',
-            '<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a>',
-            f' <button onclick="openModal(\'add-lot-modal\')">➕ 添加 Lot</button></div>']
+    from collections import defaultdict
+    today = date.today()
+    by_sym = defaultdict(list)
+    for r in raw:
+        purchase = datetime.strptime(r["purchase_date"], "%Y-%m-%d").date()
+        days = (today - purchase).days
+        by_sym[r["symbol"]].append({
+            **dict(r),
+            "days_held": days,
+            "term": "长期" if days > 365 else f"短期 ({365 - days} 天后变长期)",
+            "subtotal": r["shares"] * r["cost_per_share"],
+        })
 
-    if not rows:
-        body.append('<p style="color:var(--fg-muted);padding:20px;background:var(--bg-subtle);border-radius:8px;">还没有 lot 记录。点 "添加 Lot" 录入买入历史；以后所有买入都会出现在这里。</p>')
-    else:
-        # Group by symbol
-        from collections import defaultdict
-        by_sym = defaultdict(list)
-        for r in rows:
-            by_sym[r["symbol"]].append(r)
+    groups = [
+        {
+            "symbol": sym,
+            "total_shares": sum(l["shares"] for l in lots),
+            "total_cost": sum(l["subtotal"] for l in lots),
+            "lots": lots,
+        }
+        for sym, lots in sorted(by_sym.items())
+    ]
 
-        today = date.today()
-        for sym in sorted(by_sym):
-            lots = by_sym[sym]
-            total_shares = sum(l["shares"] for l in lots)
-            total_cost = sum(l["shares"] * l["cost_per_share"] for l in lots)
-            body.append(f'<h3 style="margin-top:24px;">{sym} · {total_shares:.3f} 股 · 总成本 ${total_cost:,.0f}</h3>')
-            body.append('<table><thead><tr><th>买入日期</th><th>持有天数</th><th>持有期</th><th>账户</th><th class="num">股数</th><th class="num">单价</th><th class="num">小计</th><th>备注</th></tr></thead><tbody>')
-            for l in lots:
-                purchase = datetime.strptime(l["purchase_date"], "%Y-%m-%d").date()
-                days = (today - purchase).days
-                term = "长期" if days > 365 else f"短期 ({365 - days} 天后变长期)"
-                cost = l["shares"] * l["cost_per_share"]
-                body.append(
-                    f'<tr><td>{l["purchase_date"]}</td>'
-                    f'<td class="num">{days}</td>'
-                    f'<td>{term}</td>'
-                    f'<td>{l["account_name"]}</td>'
-                    f'<td class="num">{l["shares"]:.3f}</td>'
-                    f'<td class="num">${l["cost_per_share"]:.2f}</td>'
-                    f'<td class="num">${cost:,.0f}</td>'
-                    f'<td style="font-size:12px;color:var(--fg-muted);">{l["note"] or ""}</td></tr>'
-                )
-            body.append('</tbody></table>')
-
-    add_modal = """
-<div class="modal-backdrop" id="add-lot-modal">
-  <div class="modal">
-    <h3>添加 Cost Basis Lot</h3>
-    <form method="post" action="/lots/add">
-      <div class="row">
-        <div class="field"><label>买入日期</label><input name="purchase_date" type="date" required></div>
-        <div class="field"><label>Ticker</label><input name="symbol" required style="text-transform:uppercase"></div>
-      </div>
-      <div class="row">
-        <div class="field"><label>账户名</label><input name="account_name" required></div>
-        <div class="field"><label>Account ID</label><input name="account_id" required></div>
-      </div>
-      <div class="row">
-        <div class="field"><label>股数</label><input name="shares" type="number" step="0.001" required></div>
-        <div class="field"><label>单价（每股）</label><input name="cost_per_share" type="number" step="0.01" required></div>
-      </div>
-      <div class="field"><label>备注</label><input name="note" placeholder="可选"></div>
-      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
-        <button type="button" class="secondary" onclick="closeModal('add-lot-modal')">取消</button>
-        <button type="submit" class="success">添加</button>
-      </div>
-    </form>
-  </div>
-</div>
-<script>
-function openModal(id) { document.getElementById(id).classList.add('open'); }
-function closeModal(id) { document.getElementById(id).classList.remove('open'); }
-</script>"""
-
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Cost Basis Lots</title><style>{CSS}</style></head><body><div class="container">
-{''.join(body)}
-{add_modal}
-</div></body></html>"""
+    return templates.TemplateResponse(
+        _dummy_request(), "lots.html",
+        {"css": CSS, "groups": groups},
+    )
 
 
 @app.post("/lots/add", response_class=HTMLResponse)
@@ -1239,79 +1193,15 @@ def performance_view(windows: str = "5,30,90"):
             hits = sum(1 for r in settled if r[f"hit_{w}"] == "hit")
             summary[rating][w] = (hits, len(settled))
 
-    body = [
-        '<h1>🎯 PM 准确度跟踪</h1>',
-        '<p class="subtitle">每个 PM 决策 vs SPY 的实际 alpha · 多窗口窗口</p>',
-        '<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>',
-    ]
-    body.append(f'<div class="status">📊 跟踪 {len(decisions)} 个决策 · 窗口: {", ".join(f"{w}d" for w in window_days)}</div>')
-
-    # Aggregate table
-    body.append('<h2>命中率汇总</h2>')
-    body.append('<table><thead><tr><th>评级</th>' + ''.join(f'<th class="num">{w}d</th>' for w in window_days) + '</tr></thead><tbody>')
-    for rating in ["Buy", "Overweight", "Hold", "Underweight", "Sell"]:
-        cells = [f'<td><span class="tag tag-{rating.lower()}" style="padding:2px 8px;">{rating}</span></td>']
-        for w in window_days:
-            hits, total = summary[rating][w]
-            if total == 0:
-                cells.append('<td class="num" style="color:var(--fg-muted);">pending</td>')
-            else:
-                pct = hits / total * 100
-                cls = "gain" if pct >= 60 else "loss" if pct < 40 else ""
-                cells.append(f'<td class="num {cls}">{hits}/{total} ({pct:.0f}%)</td>')
-        body.append('<tr>' + ''.join(cells) + '</tr>')
-    body.append('</tbody></table>')
-
-    # Per-decision details
-    body.append(f'<h2 style="margin-top:32px;">每只决策详情</h2>')
-    body.append('<table><thead><tr><th>Ticker</th><th>评级</th><th>日期</th>'
-                + ''.join(f'<th class="num">{w}d Raw / Alpha</th>' for w in window_days)
-                + ''.join(f'<th>{w}d Hit?</th>' for w in window_days)
-                + '</tr></thead><tbody>')
-    for r in rows:
-        cells = [
-            f'<td><strong>{r["symbol"]}</strong></td>',
-            f'<td><span class="tag tag-{r["rating"].lower()}" style="padding:2px 8px;">{r["rating"]}</span></td>',
-            f'<td>{r["trade_date"]}</td>',
-        ]
-        for w in window_days:
-            raw = r[f"raw_{w}"]
-            a = r[f"alpha_{w}"]
-            if raw is None:
-                cells.append('<td class="num" style="color:var(--fg-muted);">⏳ pending</td>')
-            else:
-                cls = "gain" if a > 0 else "loss"
-                cells.append(f'<td class="num {cls}">{raw*100:+.2f}% / {a*100:+.2f}%</td>')
-        for w in window_days:
-            hit = r[f"hit_{w}"]
-            emoji = {"hit": "✅", "miss": "❌", "pending": "⏳"}[hit]
-            cells.append(f'<td>{emoji}</td>')
-        body.append('<tr>' + ''.join(cells) + '</tr>')
-    body.append('</tbody></table>')
-
-    body.append('''
-<details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-top:24px;border:1px solid var(--border);">
-<summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 怎么读这表</summary>
-<ul style="margin-top:12px;font-size:13px;line-height:1.7;">
-<li><strong>Raw</strong>：该 ticker 从 trade_date 起 N 天的实际涨跌。</li>
-<li><strong>Alpha</strong>：减去同期 SPY 涨跌 — 衡量超额收益。</li>
-<li><strong>Hit?</strong>：评级方向与 alpha 方向是否一致。Buy/Overweight 看 alpha > +0.5%；Underweight/Sell 看 alpha < -0.5%；Hold 看 |alpha| < 2%。</li>
-<li><strong>命中率参考</strong>：&gt;60% 算好（绿）；&lt;40% 算差（红）。50% = 随机。</li>
-<li><strong>注意</strong>：决策刚做时（5 月 8 日）所有 5d 窗口都 pending（要到 5/15 才有数据）。30d / 90d 窗口还要等。</li>
-</ul>
-</details>
-''')
-
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PM 准确度</title><style>{CSS}
-.tag-buy {{ background: color-mix(in srgb, var(--success) 30%, transparent); color: var(--success); }}
-.tag-overweight {{ background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); }}
-.tag-hold {{ background: var(--border); color: var(--fg-muted); }}
-.tag-underweight {{ background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }}
-.tag-sell {{ background: color-mix(in srgb, var(--danger) 30%, transparent); color: var(--danger); }}
-</style></head><body><div class="container">
-{''.join(body)}
-</div></body></html>"""
+    return templates.TemplateResponse(
+        _dummy_request(), "performance.html",
+        {
+            "css": CSS, "rows": rows, "summary": summary,
+            "n_decisions": len(decisions),
+            "window_days": window_days,
+            "rating_order": _RATING_ORDER,
+        },
+    )
 
 
 @app.get("/sectors", response_class=HTMLResponse)
@@ -1364,54 +1254,32 @@ def sectors_view():
     spy_d30 = next((r["d30"] for r in results if r["symbol"] == "SPY"), 0) or 0
     spy_d90 = next((r["d90"] for r in results if r["symbol"] == "SPY"), 0) or 0
 
-    body = ['<h1>🌐 行业 ETF 轮动</h1>',
-            '<p class="subtitle">11 个 SPDR 行业 ETF + SPY 基准 · 多窗口涨跌</p>',
-            '<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>',
-            '<table><thead><tr><th>ETF</th><th>板块</th><th class="num">最新价</th><th class="num">1d</th><th class="num">5d</th><th class="num">30d</th><th class="num">90d</th><th class="num">30d vs SPY</th><th class="num">90d vs SPY</th></tr></thead><tbody>']
-
     def cls(v):
-        if v is None: return ""
+        if v is None:
+            return ""
         return "gain" if v > 0 else "loss"
-    def fmt(v):
-        if v is None: return "—"
-        return f"{v:+.2f}%"
 
-    # Sort by 30d performance descending (top performers first)
+    def fmt(v):
+        return "—" if v is None else f"{v:+.2f}%"
+
+    rows = []
     for r in sorted(results, key=lambda x: -(x["d30"] or -999)):
-        is_spy = r["symbol"] == "SPY"
         rel30 = (r["d30"] - spy_d30) if r["d30"] is not None else None
         rel90 = (r["d90"] - spy_d90) if r["d90"] is not None else None
-        row_style = ' style="background:var(--bg-subtle);font-weight:600;"' if is_spy else ''
-        body.append(
-            f'<tr{row_style}><td>{r["emoji"]} <strong>{r["symbol"]}</strong></td>'
-            f'<td>{r["name"]}</td>'
-            f'<td class="num">${r["latest"]:.2f}</td>'
-            f'<td class="num {cls(r["d1"])}">{fmt(r["d1"])}</td>'
-            f'<td class="num {cls(r["d5"])}">{fmt(r["d5"])}</td>'
-            f'<td class="num {cls(r["d30"])}">{fmt(r["d30"])}</td>'
-            f'<td class="num {cls(r["d90"])}">{fmt(r["d90"])}</td>'
-            f'<td class="num {cls(rel30)}">{fmt(rel30)}</td>'
-            f'<td class="num {cls(rel90)}">{fmt(rel90)}</td>'
-            f'</tr>'
-        )
-    body.append('</tbody></table>')
+        rows.append({
+            **r, "is_spy": r["symbol"] == "SPY",
+            "cls_d1": cls(r["d1"]), "fmt_d1": fmt(r["d1"]),
+            "cls_d5": cls(r["d5"]), "fmt_d5": fmt(r["d5"]),
+            "cls_d30": cls(r["d30"]), "fmt_d30": fmt(r["d30"]),
+            "cls_d90": cls(r["d90"]), "fmt_d90": fmt(r["d90"]),
+            "cls_rel30": cls(rel30), "fmt_rel30": fmt(rel30),
+            "cls_rel90": cls(rel90), "fmt_rel90": fmt(rel90),
+        })
 
-    body.append('''
-<details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-top:24px;border:1px solid var(--border);">
-<summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 怎么读这张表</summary>
-<ul style="margin-top:12px;font-size:13px;line-height:1.7;">
-<li><strong>"30d vs SPY"</strong>：板块超额收益（相对大盘）。正数 = 板块跑赢，负数 = 跑输。</li>
-<li><strong>板块轮动信号</strong>：30d 排名前 3 + 90d 也前 3 → 强势板块；30d 前 3 但 90d 后 3 → 反弹但短期，慎入。</li>
-<li><strong>防御 vs 进攻</strong>：XLU/XLP/XLV 跑赢 → 市场避险；XLK/XLY/XLF 跑赢 → 风险偏好。</li>
-<li><strong>对你组合的影响</strong>：你 ~80% 集中在 XLK（科技）领域。如果科技 30d 跑输 SPY → 组合大概率跑输大盘。</li>
-</ul>
-</details>
-''')
-
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>板块轮动</title><style>{CSS}</style></head><body><div class="container">
-{''.join(body)}
-</div></body></html>"""
+    return templates.TemplateResponse(
+        _dummy_request(), "sectors.html",
+        {"css": CSS, "rows": rows},
+    )
 
 
 @app.get("/tickers", response_class=HTMLResponse)
@@ -1528,21 +1396,16 @@ def charts_view():
   </div>
 </div>'''
 
-    pie_ticker = render_pie(aggregate_tickers(), "🏷️ 按 Ticker 权重")
-    pie_owner = render_pie(aggregate("owner"), "👥 按 Owner")
-    pie_type = render_pie(aggregate("account_type"), "💰 按账户类型（税务桶）")
-    pie_broker = render_pie(aggregate("broker"), "🏦 按 Broker")
-
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Charts</title><style>{CSS}</style></head><body><div class="container">
-<h1>📊 持仓权重可视化</h1>
-<p class="subtitle">总价值 <strong>${total:,.0f}</strong> · 数据日期 {latest or "今天"}</p>
-<div style="margin-bottom:24px;"><a class="btn secondary" href="/">← 持仓</a></div>
-{pie_ticker}
-{pie_owner}
-{pie_type}
-{pie_broker}
-</div></body></html>"""
+    pies = [
+        render_pie(aggregate_tickers(), "🏷️ 按 Ticker 权重"),
+        render_pie(aggregate("owner"), "👥 按 Owner"),
+        render_pie(aggregate("account_type"), "💰 按账户类型（税务桶）"),
+        render_pie(aggregate("broker"), "🏦 按 Broker"),
+    ]
+    return templates.TemplateResponse(
+        _dummy_request(), "charts.html",
+        {"css": CSS, "pies": pies, "total": total, "latest": latest},
+    )
 
 
 @app.get("/thesis-evolution", response_class=HTMLResponse)
@@ -1562,69 +1425,37 @@ def thesis_evolution_view():
     evolving = {s: rs for s, rs in by_symbol.items() if len(rs) >= 2}
     stable = {s: rs for s, rs in by_symbol.items() if len(rs) == 1}
 
-    body = [
-        '<h1>📈 Thesis 演变跟踪</h1>',
-        '<p class="subtitle">同 ticker 跨多次分析的评级变化 — 看 PM 自己判断稳定性</p>',
-        '<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>',
-    ]
-
-    body.append(f'<div class="status">📊 {len(by_symbol)} 个 ticker · <strong>{len(evolving)}</strong> 个有多次分析 · <strong>{len(stable)}</strong> 个仅 1 次</div>')
-
     pt_re = _re.compile(r"Price Target.*?\$?([\d.]+)")
-    if evolving:
-        body.append('<h2 style="margin-top:24px;">🔄 评级演变（≥ 2 次分析）</h2>')
-        body.append('<table><thead><tr><th>Ticker</th><th>评级序列（旧→新）</th><th>PT 序列</th><th>稳定性</th></tr></thead><tbody>')
-        for sym in sorted(evolving):
-            seq = evolving[sym]
-            rating_seq = [r["rating"] for r in seq]
-            pt_seq = []
-            for r in seq:
-                m = pt_re.search(r["final_decision"] or "")
-                pt_seq.append(f"${m.group(1)}" if m else "—")
+    rows_out = []
+    for sym in sorted(evolving):
+        seq = evolving[sym]
+        rating_seq = [r["rating"] for r in seq]
+        pt_seq = []
+        for r in seq:
+            m = pt_re.search(r["final_decision"] or "")
+            pt_seq.append(f"${m.group(1)}" if m else "—")
+        n_unique = len(set(rating_seq))
+        if n_unique == 1:
+            stability = "✅ 完全一致"
+        elif n_unique == 2:
+            stability = "🟡 轻微变化"
+        else:
+            stability = "⚠️ 明显分歧"
+        rows_out.append({
+            "symbol": sym,
+            "rating_seq": rating_seq,
+            "pt_seq": pt_seq,
+            "stability": stability,
+        })
 
-            rating_html = " → ".join(
-                f'<span class="tag tag-{rt.lower()}" style="padding:2px 8px;font-size:11px;">{rt}</span>'
-                for rt in rating_seq
-            )
-            n_unique = len(set(rating_seq))
-            if n_unique == 1:
-                stability = '✅ 完全一致'
-            elif n_unique == 2:
-                stability = '🟡 轻微变化'
-            else:
-                stability = '⚠️ 明显分歧'
-            body.append(
-                f'<tr><td><strong><a href="/decisions/{sym}">{sym}</a></strong></td>'
-                f'<td>{rating_html}</td>'
-                f'<td style="font-size:12px;">{" → ".join(pt_seq)}</td>'
-                f'<td>{stability}</td></tr>'
-            )
-        body.append('</tbody></table>')
-    else:
-        body.append('<p style="color:var(--fg-muted);">还没有 ticker 被多次分析过。每次重跑分析后这里会自动出现演变。</p>')
-
-    body.append('''
-<details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-top:24px;border:1px solid var(--border);">
-<summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 为什么 thesis 演变重要</summary>
-<ul style="margin-top:12px;font-size:13px;line-height:1.7;">
-<li><strong>判断稳定性</strong>：同 ticker 跨多次分析的评级应该相对稳定 — 大幅翻转（Buy → Sell）需要新事件来 justify。</li>
-<li><strong>检测 model drift</strong>：如果 PM 在没有新事实的情况下改变立场，可能是 LLM 抽奖性而非真判断。</li>
-<li><strong>历史成本基础</strong>：未来 6-12 个月，你能看到"我 5 月给 NVDA Overweight，10 月还是 Overweight，2027 年 1 月变 Hold" — 这种演变本身是有意义的信号。</li>
-<li><strong>学习数据</strong>：评级变化 + 实际 alpha = PM 的真实命中率（详见 /runs 反向验证）</li>
-</ul>
-</details>
-''')
-
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Thesis 演变</title><style>{CSS}
-.tag-buy {{ background: color-mix(in srgb, var(--success) 30%, transparent); color: var(--success); }}
-.tag-overweight {{ background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); }}
-.tag-hold {{ background: var(--border); color: var(--fg-muted); }}
-.tag-underweight {{ background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }}
-.tag-sell {{ background: color-mix(in srgb, var(--danger) 30%, transparent); color: var(--danger); }}
-</style></head><body><div class="container">
-{''.join(body)}
-</div></body></html>"""
+    return templates.TemplateResponse(
+        _dummy_request(), "thesis_evolution.html",
+        {
+            "css": CSS, "rows": rows_out,
+            "n_total": len(by_symbol),
+            "n_stable": len(stable),
+        },
+    )
 
 
 @app.get("/owners", response_class=HTMLResponse)

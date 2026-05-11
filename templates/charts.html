@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Charts{% endblock %}
+
+{% block content %}
+  <h1>📊 持仓权重可视化</h1>
+  <p class="subtitle">总价值 <strong>${{ "{:,.0f}".format(total) }}</strong> · 数据日期 {{ latest or "今天" }}</p>
+  <div style="margin-bottom:24px;"><a class="btn secondary" href="/">← 持仓</a></div>
+
+  {% for pie in pies %}
+    {{ pie|safe }}
+  {% endfor %}
+{% endblock %}

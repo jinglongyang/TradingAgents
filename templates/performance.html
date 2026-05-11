@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}PM 准确度{% endblock %}
+
+{% block content %}
+  <h1>🎯 PM 准确度跟踪</h1>
+  <p class="subtitle">每个 PM 决策 vs SPY 的实际 alpha · 多窗口窗口</p>
+  <div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>
+
+  <div class="status">
+    📊 跟踪 {{ n_decisions }} 个决策 · 窗口: {{ window_days|join("d, ") }}d
+  </div>
+
+  <h2>命中率汇总</h2>
+  <table>
+    <thead><tr>
+      <th>评级</th>
+      {% for w in window_days %}<th class="num">{{ w }}d</th>{% endfor %}
+    </tr></thead>
+    <tbody>
+      {% for rating in rating_order %}
+      <tr>
+        <td><span class="tag tag-{{ rating|lower }}" style="padding:2px 8px;">{{ rating }}</span></td>
+        {% for w in window_days %}
+          {% set hits = summary[rating][w][0] %}
+          {% set total = summary[rating][w][1] %}
+          {% if total == 0 %}
+            <td class="num" style="color:var(--fg-muted);">pending</td>
+          {% else %}
+            {% set pct = hits / total * 100 %}
+            <td class="num {{ 'gain' if pct >= 60 else 'loss' if pct < 40 else '' }}">
+              {{ hits }}/{{ total }} ({{ "%.0f"|format(pct) }}%)
+            </td>
+          {% endif %}
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h2 style="margin-top:32px;">每只决策详情</h2>
+  <table>
+    <thead><tr>
+      <th>Ticker</th><th>评级</th><th>日期</th>
+      {% for w in window_days %}<th class="num">{{ w }}d Raw / Alpha</th>{% endfor %}
+      {% for w in window_days %}<th>{{ w }}d Hit?</th>{% endfor %}
+    </tr></thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td><strong>{{ r.symbol }}</strong></td>
+        <td><span class="tag tag-{{ r.rating|lower }}" style="padding:2px 8px;">{{ r.rating }}</span></td>
+        <td>{{ r.trade_date }}</td>
+        {% for w in window_days %}
+          {% if r["raw_" ~ w] is none %}
+            <td class="num" style="color:var(--fg-muted);">⏳ pending</td>
+          {% else %}
+            {% set a = r["alpha_" ~ w] %}
+            <td class="num {{ 'gain' if a > 0 else 'loss' }}">
+              {{ "%+.2f"|format(r["raw_" ~ w] * 100) }}% / {{ "%+.2f"|format(a * 100) }}%
+            </td>
+          {% endif %}
+        {% endfor %}
+        {% for w in window_days %}
+          {% set hit = r["hit_" ~ w] %}
+          <td>{{ {'hit': '✅', 'miss': '❌', 'pending': '⏳'}[hit] }}</td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-top:24px;border:1px solid var(--border);">
+    <summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 怎么读这表</summary>
+    <ul style="margin-top:12px;font-size:13px;line-height:1.7;">
+      <li><strong>Raw</strong>：该 ticker 从 trade_date 起 N 天的实际涨跌。</li>
+      <li><strong>Alpha</strong>：减去同期 SPY 涨跌 — 衡量超额收益。</li>
+      <li><strong>Hit?</strong>：评级方向与 alpha 方向是否一致。Buy/Overweight 看 alpha > +0.5%；Underweight/Sell 看 alpha < -0.5%；Hold 看 |alpha| < 2%。</li>
+      <li><strong>命中率参考</strong>：&gt;60% 算好（绿）；&lt;40% 算差（红）。50% = 随机。</li>
+      <li><strong>注意</strong>：决策刚做时（5 月 8 日）所有 5d 窗口都 pending（要到 5/15 才有数据）。30d / 90d 窗口还要等。</li>
+    </ul>
+  </details>
+{% endblock %}
