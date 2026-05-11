@@ -552,9 +552,10 @@ function toggleRunMode(mode) {{
 
 
 @app.get("/", response_class=HTMLResponse)
-def index():
+def index(msg: str = ""):
     init_db()
-    return _render()
+    flash = f'<div class="msg success">{msg}</div>' if msg else ""
+    return _render(message=flash)
 
 
 @app.post("/add")
@@ -614,10 +615,11 @@ def delete_row(snapshot_id: int = Form(...)):
 def update_prices():
     """Refresh last_price + current_value for every position by polling yfinance."""
     import yfinance as _yf
+    from urllib.parse import quote as _quote
 
     latest = latest_snapshot_date()
     if not latest:
-        return _render(message='<div class="msg error">DB 为空，没数据可更新</div>')
+        return RedirectResponse(url="/?msg=" + _quote("DB 为空，没数据可更新"), status_code=303)
 
     with connect() as conn:
         symbols = [r["symbol"] for r in conn.execute(
@@ -626,13 +628,13 @@ def update_prices():
         ).fetchall()]
 
     if not symbols:
-        return _render(message='<div class="msg error">没有 ticker 可更新</div>')
+        return RedirectResponse(url="/?msg=" + _quote("没有 ticker 可更新"), status_code=303)
 
     # Batch fetch via yfinance
     try:
         data = _yf.download(symbols, period="5d", progress=False, auto_adjust=True)["Close"]
     except Exception as e:
-        return _render(message=f'<div class="msg error">yfinance 错误: {e}</div>')
+        return RedirectResponse(url="/?msg=" + _quote(f"yfinance 错误: {e}"), status_code=303)
 
     import pandas as _pd
     if isinstance(data, _pd.Series):
@@ -670,10 +672,10 @@ def update_prices():
             )
             updated += cur.rowcount
 
-    msg_parts = [f'✓ 更新了 <strong>{updated}</strong> 行 ({len(symbols)} 个 ticker)']
+    msg = f"✓ 更新了 {updated} 行 ({len(symbols)} 个 ticker)"
     if missing:
-        msg_parts.append(f' · 拉取失败: {", ".join(missing[:10])}')
-    return _render(message=f'<div class="msg success">{"".join(msg_parts)}</div>')
+        msg += f" · 拉取失败: {', '.join(missing[:10])}"
+    return RedirectResponse(url="/?msg=" + _quote(msg), status_code=303)
 
 
 @app.post("/account-delete", response_class=HTMLResponse)
