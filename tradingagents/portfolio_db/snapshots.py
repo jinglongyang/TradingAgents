@@ -214,3 +214,49 @@ def snapshot_age_days(db_path: Path | None = None) -> int | None:
     if not latest:
         return None
     return (date.today() - datetime.strptime(latest, "%Y-%m-%d").date()).days
+
+
+def load_latest_positions(db_path: Path | None = None) -> list[Position]:
+    """Return Positions from the latest snapshot, joining tickers for canonical price.
+
+    Replaces parse_fidelity_csv for the analyze-holdings path: DB is now the
+    source of truth (UI edits, Robinhood adds, price updates, ticker fixes
+    only land here). Falls back to positions_snapshot.last_price when the
+    tickers table has no entry for a symbol.
+    """
+    latest = latest_snapshot_date(db_path)
+    if not latest:
+        return []
+    out: list[Position] = []
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT ps.account_id, ps.account_name, ps.account_type, ps.symbol,
+                   ps.quantity, ps.cost_basis_total, ps.avg_cost, ps.broker,
+                   COALESCE(t.last_price, ps.last_price) AS last_price
+              FROM positions_snapshot ps
+              LEFT JOIN tickers t ON t.symbol = ps.symbol
+             WHERE ps.import_date = ?
+            """,
+            (latest,),
+        ).fetchall()
+    for r in rows:
+        qty = float(r["quantity"] or 0)
+        price = float(r["last_price"] or 0)
+        try:
+            acct_type = AccountType(r["account_type"]) if r["account_type"] else classify_account(r["account_name"] or "")
+        except ValueError:
+            acct_type = classify_account(r["account_name"] or "")
+        out.append(Position(
+            account_id=r["account_id"] or "",
+            account_name=r["account_name"] or "",
+            account_type=acct_type,
+            symbol=r["symbol"],
+            quantity=qty,
+            last_price=price,
+            current_value=qty * price,
+            cost_basis_total=float(r["cost_basis_total"] or 0),
+            avg_cost=float(r["avg_cost"] or 0),
+            broker=r["broker"] or "Unknown",
+        ))
+    return out

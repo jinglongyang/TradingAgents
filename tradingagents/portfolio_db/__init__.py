@@ -16,6 +16,7 @@ from tradingagents.portfolio_db.snapshots import (
     import_csv_snapshot,
     import_manual_snapshot,
     latest_snapshot_date,
+    load_latest_positions,
     snapshot_age_days,
 )
 from tradingagents.portfolio_db.executions import (
@@ -32,6 +33,7 @@ __all__ = [
     "import_csv_snapshot",
     "import_manual_snapshot",
     "latest_snapshot_date",
+    "load_latest_positions",
     "snapshot_age_days",
     "record_execution",
     "list_executions",

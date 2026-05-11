@@ -275,9 +275,32 @@ def _build_holdings_view():
 
 
 def _render(message: str = ""):
+    import json as _json
     html_view, n_rows, total_val = _build_holdings_view()
     latest = latest_snapshot_date() or "(none)"
     today = date.today().isoformat()
+    # Build ticker pool for autocomplete: union of tickers table and any
+    # symbols held in the latest snapshot that aren't there yet.
+    ticker_pool: list[dict[str, str]] = []
+    with connect() as _conn:
+        for r in _conn.execute(
+            """
+            SELECT COALESCE(t.symbol, ps.symbol) AS s,
+                   COALESCE(t.name, '') AS n
+              FROM positions_snapshot ps
+              LEFT JOIN tickers t ON t.symbol = ps.symbol
+             WHERE ps.import_date = COALESCE((SELECT MAX(import_date) FROM positions_snapshot), '')
+             GROUP BY COALESCE(t.symbol, ps.symbol)
+             UNION
+            SELECT symbol AS s, COALESCE(name, '') AS n FROM tickers
+            """,
+        ).fetchall():
+            ticker_pool.append({"s": r["s"], "n": r["n"] or ""})
+    ticker_pool.sort(key=lambda x: x["s"])
+    ticker_json = _json.dumps(ticker_pool, ensure_ascii=False)
+    datalist_html = "".join(
+        f'<option value="{t["s"]}">{t["n"]}</option>' for t in ticker_pool
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -292,11 +315,12 @@ def _render(message: str = ""):
   <p class="subtitle">本地浏览器界面 · 数据存在 ~/.tradingagents/portfolio.db · 任何时候关掉浏览器都不会丢数据</p>
 
   <form method="get" action="/lookup" style="margin-bottom:20px;display:flex;gap:8px;">
-    <input name="q" placeholder="🔍 输入 ticker (如 NVDA, CRWV, IREN) 查看持仓 + PM 评级 + 一键触发分析"
-           style="flex:1;padding:10px 14px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:14px;"
-           autofocus required style="text-transform:uppercase">
+    <input name="q" list="all-tickers-dl" placeholder="🔍 输入 ticker (如 NVDA, CRWV, IREN) 查看持仓 + PM 评级 + 一键触发分析"
+           style="flex:1;padding:10px 14px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:14px;text-transform:uppercase;"
+           autofocus required autocomplete="off">
     <button type="submit">查询</button>
   </form>
+  <datalist id="all-tickers-dl">{datalist_html}</datalist>
 
   <div class="status">
     最新 snapshot: <strong>{latest}</strong> · {n_rows} 仓位 · 总价值 <strong>${total_val:,.0f}</strong> · 今天: {today}
@@ -432,8 +456,12 @@ def _render(message: str = ""):
       </div>
 
       <div class="field" id="run-tickers-field">
-        <label>Ticker(s) <span class="hint">逗号分隔，如 NVDA,CRWV 或 IREN（持仓 ticker 带账户上下文，新 ticker 用探索性分析）</span></label>
-        <input name="tickers" placeholder="NVDA,CRWV 或 IREN">
+        <label>Ticker(s) <span class="hint">逗号 / 空格 / 顿号都可分隔，如 NVDA,CRWV 或 NVDA AMD CRWV（持仓 ticker 带账户上下文，新 ticker 用探索性分析）</span></label>
+        <div style="position:relative;">
+          <input name="tickers" id="run-tickers-input" placeholder="NVDA, CRWV 或 NVDA AMD"
+                 autocomplete="off" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:14px;text-transform:uppercase;">
+          <div id="run-tickers-suggest" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;margin-top:2px;max-height:240px;overflow-y:auto;z-index:1000;box-shadow:0 4px 12px rgba(0,0,0,0.1);"></div>
+        </div>
       </div>
 
       <div class="field" id="run-sector-field" style="display:none;">
@@ -460,6 +488,84 @@ function toggleRunMode(mode) {{
     document.getElementById('run-tickers-field').style.display = mode === 'tickers' ? '' : 'none';
     document.getElementById('run-sector-field').style.display = mode === 'sector' ? '' : 'none';
 }}
+
+// Token-aware autocomplete for the multi-ticker input.
+// Splits on the same separator the server uses, completes only the
+// last token, and inserts " " after pick so the user keeps typing.
+(function() {{
+    const KNOWN = {ticker_json};
+    const input = document.getElementById('run-tickers-input');
+    const box = document.getElementById('run-tickers-suggest');
+    if (!input || !box) return;
+    let activeIdx = -1;
+    let matches = [];
+
+    function lastToken(value, caret) {{
+        const before = value.slice(0, caret);
+        const m = before.match(/[^\\s,，、;]*$/);
+        return m ? m[0] : '';
+    }}
+
+    function render() {{
+        while (box.firstChild) box.removeChild(box.firstChild);
+        if (matches.length === 0) {{ box.style.display = 'none'; return; }}
+        matches.forEach((t, i) => {{
+            const row = document.createElement('div');
+            row.dataset.idx = String(i);
+            row.style.cssText = 'padding:6px 12px;cursor:pointer;' + (i === activeIdx ? 'background:var(--bg-subtle);' : '');
+            const sym = document.createElement('strong');
+            sym.textContent = t.s;
+            row.appendChild(sym);
+            if (t.n) {{
+                const nm = document.createElement('span');
+                nm.style.cssText = 'color:var(--fg-muted);font-size:12px;margin-left:8px;';
+                nm.textContent = t.n;
+                row.appendChild(nm);
+            }}
+            box.appendChild(row);
+        }});
+        box.style.display = 'block';
+    }}
+
+    function pick(idx) {{
+        if (idx < 0 || idx >= matches.length) return;
+        const caret = input.selectionStart;
+        const value = input.value;
+        const before = value.slice(0, caret);
+        const after = value.slice(caret);
+        const newBefore = before.replace(/[^\\s,，、;]*$/, matches[idx].s + ' ');
+        input.value = newBefore + after;
+        const newCaret = newBefore.length;
+        input.setSelectionRange(newCaret, newCaret);
+        matches = []; activeIdx = -1; render();
+        input.focus();
+    }}
+
+    input.addEventListener('input', () => {{
+        const tok = lastToken(input.value, input.selectionStart).toUpperCase();
+        if (!tok) {{ matches = []; render(); return; }}
+        matches = KNOWN.filter(t => t.s.startsWith(tok) || (t.n && t.n.toUpperCase().includes(tok))).slice(0, 8);
+        activeIdx = matches.length ? 0 : -1;
+        render();
+    }});
+
+    input.addEventListener('keydown', (e) => {{
+        if (box.style.display === 'none') return;
+        if (e.key === 'ArrowDown') {{ e.preventDefault(); activeIdx = Math.min(activeIdx + 1, matches.length - 1); render(); }}
+        else if (e.key === 'ArrowUp') {{ e.preventDefault(); activeIdx = Math.max(activeIdx - 1, 0); render(); }}
+        else if (e.key === 'Enter' && activeIdx >= 0) {{ e.preventDefault(); pick(activeIdx); }}
+        else if (e.key === 'Escape') {{ matches = []; render(); }}
+    }});
+
+    box.addEventListener('mousedown', (e) => {{
+        const target = e.target.closest('[data-idx]');
+        if (!target) return;
+        e.preventDefault();
+        pick(parseInt(target.dataset.idx, 10));
+    }});
+
+    input.addEventListener('blur', () => {{ setTimeout(() => {{ matches = []; render(); }}, 150); }});
+}})();
 </script>
 
 <!-- Account-level Edit Modal -->
@@ -2383,7 +2489,7 @@ def run_analysis(
         full_cmd = (
             f"echo running > {status_path} && "
             + " && ".join(cmd_chain)
-            + f" && echo done > {status_path}; echo failed >> {status_path}"
+            + f" && echo done > {status_path} || echo failed > {status_path}"
         )
         _sp.Popen(["sh", "-c", full_cmd], env=env, cwd=str(project_root),
                   stdout=open(log_path, "w"), stderr=_sp.STDOUT, start_new_session=True)
@@ -2410,7 +2516,8 @@ def run_analysis(
         if not ticker_list:
             return _render(message='<div class="msg error">没有持仓数据可分析</div>')
     else:
-        ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+        # Accept any of: comma / space / tab / Chinese comma / Chinese dunhao / semicolon
+        ticker_list = [t.upper() for t in re.split(r"[\s,，、;]+", tickers.strip()) if t]
         if not ticker_list:
             return _render(message='<div class="msg error">没有提供 ticker</div>')
 
@@ -2451,7 +2558,7 @@ def run_analysis(
     full_cmd = (
         f"echo running > {status_path} && "
         + " && ".join(cmds)
-        + f" && echo done > {status_path}; echo failed >> {status_path}"
+        + f" && echo done > {status_path} || echo failed > {status_path}"
     )
 
     _sp.Popen(
@@ -2476,6 +2583,22 @@ def run_analysis(
     return _render(message=msg)
 
 
+def _find_output_dir_for_run(log_path: str) -> Path | None:
+    """Scan a pm_run log for the 'All outputs written to' line to locate the
+    analyze_holdings output dir. Returns None if not yet written."""
+    try:
+        content = Path(log_path).read_text()
+    except Exception:
+        return None
+    m = re.search(r"All outputs written to (\S+)", content)
+    if not m:
+        return None
+    p = Path(m.group(1))
+    if not p.is_absolute():
+        p = Path(__file__).resolve().parent.parent / p
+    return p if p.exists() else None
+
+
 @app.get("/runs", response_class=HTMLResponse)
 def runs_view():
     """List all pm_run_*.log files with their current status."""
@@ -2489,7 +2612,7 @@ def runs_view():
     if not logs:
         body.append('<p style="color:var(--fg-muted);">还没运行过分析 — 用主页 🚀 按钮启动</p>')
     else:
-        body.append('<table><thead><tr><th>Run ID</th><th>状态</th><th>触发 ticker</th><th>最近活动</th><th></th></tr></thead><tbody>')
+        body.append('<table><thead><tr><th>Run ID</th><th>状态</th><th>触发 ticker</th><th>最近活动</th><th>操作</th></tr></thead><tbody>')
         for log in logs:
             run_id = log.replace("/tmp/pm_run_", "").replace(".log", "")
             status_path = log.replace(".log", ".status")
@@ -2509,12 +2632,15 @@ def runs_view():
             except Exception:
                 pass
             badge = {"running": "🟡 进行中", "done": "✅ 完成", "failed": "❌ 失败", "queued": "⏳ 排队"}.get(status, status)
+            actions = f'<a href="/runs/{run_id}" class="btn small secondary">日志</a>'
+            if _find_output_dir_for_run(log) is not None:
+                actions += f' <a href="/runs/{run_id}/result" class="btn small">结果</a>'
             body.append(
                 f'<tr><td><code>{run_id}</code></td>'
                 f'<td>{badge}</td>'
                 f'<td>{tickers}</td>'
                 f'<td style="font-size:11px;color:var(--fg-muted);">{last_line[:80]}</td>'
-                f'<td><a href="/runs/{run_id}" class="btn small secondary">日志</a></td></tr>'
+                f'<td>{actions}</td></tr>'
             )
         body.append('</tbody></table>')
 
@@ -2533,12 +2659,97 @@ def run_detail(run_id: str):
     if not Path(log_path).exists():
         return HTMLResponse(f"<p>Run {run_id} 不存在</p><a href='/runs'>← Back</a>")
     log_content = Path(log_path).read_text()[-10000:]  # tail
+    result_link = ""
+    if _find_output_dir_for_run(log_path) is not None:
+        result_link = f' · <a class="btn small" href="/runs/{run_id}/result">查看结果</a>'
     return f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Run {run_id}</title><style>{CSS}
 pre {{ background: var(--bg-subtle); padding: 16px; border-radius: 6px; overflow-x: auto; font-size: 12px; max-height: 70vh; overflow-y: auto; }}
 </style></head><body><div class="container">
 <h1>Run {run_id}</h1>
-<div style="margin-bottom:16px;"><a class="btn secondary" href="/runs">← 运行列表</a></div>
+<div style="margin-bottom:16px;"><a class="btn secondary" href="/runs">← 运行列表</a>{result_link}</div>
 <pre>{log_content}</pre>
+</div></body></html>"""
+
+
+@app.get("/runs/{run_id}/result", response_class=HTMLResponse)
+def run_result(run_id: str):
+    """Render the REPORT.md + decisions table for a completed run."""
+    log_path = f"/tmp/pm_run_{run_id}.log"
+    if not Path(log_path).exists():
+        return HTMLResponse(f"<p>Run {run_id} 不存在</p><a href='/runs'>← Back</a>")
+    out_dir = _find_output_dir_for_run(log_path)
+    if out_dir is None:
+        return HTMLResponse(
+            f"<p>Run {run_id} 还没产出 (analyze_holdings 没写 outputs/ — 可能还在跑或失败了)</p>"
+            f"<a href='/runs/{run_id}'>← 查看日志</a>"
+        )
+
+    import markdown as _md
+
+    # 1. Render REPORT.md
+    report_path = out_dir / "REPORT.md"
+    report_html = ""
+    if report_path.exists():
+        report_html = _md.markdown(report_path.read_text(encoding="utf-8"), extensions=["tables", "fenced_code"])
+    else:
+        report_html = "<p style='color:var(--fg-muted);'>REPORT.md not found in output dir.</p>"
+
+    # 2. Pull decisions from DB for the tickers in this run (latest only)
+    log_text = Path(log_path).read_text()
+    m = re.search(r"Will analyze \d+ ticker\(s\):\s*([^\n]+)", log_text)
+    tickers_for_run = [t.strip() for t in (m.group(1) if m else "").split(",") if t.strip()]
+    db_rows = []
+    if tickers_for_run:
+        with connect() as conn:
+            placeholders = ",".join("?" * len(tickers_for_run))
+            db_rows = conn.execute(
+                f"""
+                SELECT symbol, trade_date, rating, created_at, decision_id
+                  FROM decisions
+                 WHERE symbol IN ({placeholders})
+                 ORDER BY decision_id DESC
+                """,
+                tickers_for_run,
+            ).fetchall()
+    seen: set[str] = set()
+    latest_decisions = []
+    for r in db_rows:
+        if r["symbol"] in seen:
+            continue
+        seen.add(r["symbol"])
+        latest_decisions.append(r)
+
+    decision_rows_html = ""
+    if latest_decisions:
+        decision_rows_html = "".join(
+            f'<tr><td><strong><a href="/decisions/{r["symbol"]}">{r["symbol"]}</a></strong></td>'
+            f'<td>{r["rating"]}</td>'
+            f'<td>{r["trade_date"]}</td>'
+            f'<td style="font-size:11px;color:var(--fg-muted);">{r["created_at"]}</td></tr>'
+            for r in latest_decisions
+        )
+
+    rel_dir = out_dir.relative_to(Path(__file__).resolve().parent.parent) if str(out_dir).startswith(str(Path(__file__).resolve().parent.parent)) else out_dir
+
+    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Run {run_id} — 结果</title><style>{CSS}
+.report {{ background: var(--bg-subtle); padding: 24px; border-radius: 8px; line-height: 1.7; }}
+.report h1, .report h2, .report h3 {{ margin-top: 24px; }}
+.report table {{ margin: 12px 0; }}
+.report code {{ background: rgba(125,125,125,0.1); padding: 1px 6px; border-radius: 3px; font-size: 90%; }}
+</style></head><body><div class="container">
+<h1>📊 Run {run_id} — 结果</h1>
+<div style="margin-bottom:16px;">
+  <a class="btn secondary" href="/runs">← 运行列表</a>
+  <a class="btn secondary" href="/runs/{run_id}">查看日志</a>
+  <span style="color:var(--fg-muted);font-size:12px;margin-left:12px;">输出目录: <code>{rel_dir}</code></span>
+</div>
+
+<h2>本次 PM 评级（从 DB 拉最新）</h2>
+{('<table><thead><tr><th>Ticker</th><th>Rating</th><th>Trade Date</th><th>Created</th></tr></thead><tbody>' + decision_rows_html + '</tbody></table>') if decision_rows_html else '<p style="color:var(--fg-muted);">没在 DB 找到这次 run 的决定 — 可能 migrate 还没跑或失败了</p>'}
+
+<h2>REPORT.md</h2>
+<div class="report">{report_html}</div>
 </div></body></html>"""
 
 

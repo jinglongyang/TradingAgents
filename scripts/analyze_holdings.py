@@ -45,6 +45,7 @@ from tradingagents.portfolio.holdings import (  # noqa: E402
     build_holdings_context,
     parse_fidelity_csv,
 )
+from tradingagents.portfolio_db import latest_snapshot_date, load_latest_positions  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,6 +58,20 @@ DEFAULT_CSV_PATHS = [
     Path.home() / "Downloads" / "Portfolio_Positions_May-10-2026.csv",
     Path.home() / "Downloads" / "Portfolio_Positions_May-10-2026(1).csv",
 ]
+
+
+def load_holdings_from_db() -> tuple[dict[str, Holding], float]:
+    """Load latest snapshot from SQLite — the source of truth.
+
+    UI edits, Robinhood adds, price updates, and ticker fixes only land
+    in the DB, so CSV reading is reserved for one-off overrides via --csv.
+    """
+    positions = load_latest_positions()
+    snap = latest_snapshot_date()
+    log.info("Loaded %d positions from DB (snapshot %s)", len(positions), snap)
+    holdings = aggregate_by_ticker(positions)
+    total_value = sum(h.total_value for h in holdings.values())
+    return holdings, total_value
 
 
 def load_holdings(csv_paths: list[Path]) -> tuple[dict[str, Holding], float]:
@@ -277,12 +292,16 @@ def main() -> int:
         else None
     )
 
-    csv_paths = args.csv if args.csv else DEFAULT_CSV_PATHS
-    holdings, portfolio_total = load_holdings(csv_paths)
+    if args.csv:
+        holdings, portfolio_total = load_holdings(args.csv)
+        source = "CSV override"
+    else:
+        holdings, portfolio_total = load_holdings_from_db()
+        source = "DB"
     if not holdings:
-        log.error("No holdings parsed from any CSV.")
+        log.error("No holdings loaded from %s.", source)
         return 1
-    log.info("Aggregated portfolio: $%.0f across %d tickers", portfolio_total, len(holdings))
+    log.info("Aggregated portfolio (%s): $%.0f across %d tickers", source, portfolio_total, len(holdings))
 
     tickers = select_tickers(holdings, portfolio_total, args.min_pct, args.ticker, explicit_list)
     log.info("Will analyze %d ticker(s): %s", len(tickers), ", ".join(tickers))
