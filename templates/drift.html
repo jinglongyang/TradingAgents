@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Drift Alert{% endblock %}
+
+{% block content %}
+  <h1>⚠️ Position Drift Alert</h1>
+  <p class="subtitle">PM 评级 vs 当前组合权重的错配 — 越靠前越紧迫</p>
+  <div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>
+
+  <details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-bottom:16px;border:1px solid var(--border);">
+    <summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 如何读这个表</summary>
+    <ul style="margin-top:12px;font-size:13px;color:var(--fg-muted);">
+      <li>🔴 <strong>紧迫减仓</strong>：PM 评级 Sell 且组合权重 > 0.5%</li>
+      <li>🟡 <strong>应减仓</strong>：PM 评级 Underweight 且权重 > 2%</li>
+      <li>🔵 <strong>加仓空间</strong>：PM 评级 Buy/Overweight 但当前权重 < 0.5%</li>
+      <li>✓ <strong>充分</strong>：Buy/Overweight 且权重 > 1.5%（已合理配置）</li>
+      <li>— <strong>Hold</strong>：评级中性，不需 drift action</li>
+    </ul>
+  </details>
+
+  <table>
+    <thead><tr>
+      <th>Ticker</th><th>评级</th>
+      <th class="num">当前价值</th><th class="num">组合权重</th><th>Drift 状态</th>
+    </tr></thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td><strong>{{ r.symbol }}</strong></td>
+        <td><span class="tag tag-{{ r.rating|lower }}" style="padding:2px 8px;">{{ r.rating }}</span></td>
+        <td class="num">${{ "{:,.0f}".format(r.value) }}</td>
+        <td class="num {{ r.weight_class }}">{{ "%.2f"|format(r.weight) }}%</td>
+        <td>{{ r.action }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endblock %}

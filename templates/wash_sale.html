@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Wash Sale Alert{% endblock %}
+
+{% block content %}
+  <h1>🚫 Wash Sale 警告</h1>
+  <p class="subtitle">检测 61 天窗口内"卖出损失 + 买回同票"的潜在违规</p>
+  <div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>
+
+  <div class="status">
+    扫描了 {{ n_sells }} 笔卖出 × {{ n_buys }} 笔买入。
+    <strong>{{ alerts|length }}</strong> 个潜在 wash sale 警告。
+  </div>
+
+  {% if not alerts %}
+    <p style="color:var(--fg-muted);padding:20px;background:var(--bg-subtle);border-radius:8px;">✅ 当前没有 wash sale 风险。</p>
+  {% else %}
+    <table>
+      <thead><tr>
+        <th>Ticker</th><th>卖出</th><th>买回</th>
+        <th class="num">间隔（天）</th><th class="num">受影响损失</th><th>风险</th>
+      </tr></thead>
+      <tbody>
+        {% for a in alerts %}
+        <tr>
+          <td><strong>{{ a.symbol }}</strong></td>
+          <td>
+            {{ a.sell_date }} · {{ "%.2f"|format(a.sell_shares) }} @ ${{ "%.2f"|format(a.sell_price) }}<br>
+            <span style="font-size:11px;color:var(--fg-muted);">{{ a.sell_account }}</span>
+          </td>
+          <td>
+            {{ a.buy_date }} · {{ "%.2f"|format(a.buy_shares) }} @ ${{ "%.2f"|format(a.buy_price) }}<br>
+            <span style="font-size:11px;color:var(--fg-muted);">{{ a.buy_account }}</span>
+          </td>
+          <td class="num">{{ "%+d"|format(a.delta_days) }}</td>
+          <td class="num loss">−${{ "{:,.0f}".format(a.estimated_loss) }}</td>
+          <td>{% if a.delta_days|abs <= 30 %}🔴 高{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+
+  <details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-top:24px;border:1px solid var(--border);">
+    <summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 Wash Sale Rule 详解</summary>
+    <ul style="margin-top:12px;font-size:13px;line-height:1.7;">
+      <li><strong>定义</strong>：IRS 规则 — 卖出有损失的证券后 30 天内（前后各 30 天，<strong>61 天总窗口</strong>）买回 substantially identical 证券，损失不能抵税。</li>
+      <li><strong>什么算 substantially identical</strong>：同一 ticker；同公司不同 share class（罕见）；密切跟踪同一指数的 ETF 之间也可能（争议）。</li>
+      <li><strong>跨账户 + 跨配偶</strong>：⚠️ Wash sale rule 适用于<strong>你和配偶的全部账户</strong>（包括 401k / IRA）。所以这个工具扫描了所有账户的交易。</li>
+      <li><strong>常见错误</strong>：401k 自动定投 + 同时在 taxable 卖出同一只股 → 触发 wash sale。</li>
+      <li><strong>合法替代品</strong>：卖 VOO 想保持大盘敞口 → 买 IVV 或 SPLG（不同发行商但都跟踪 S&amp;P 500，争议小）。卖 NVDA → 买半导体 ETF（SOXX/SMH）肯定 OK。</li>
+      <li><strong>后果</strong>：损失加到买回的 cost basis，所以税务上是 deferred 而不是 lost。但当年抵税计划被打乱。</li>
+    </ul>
+  </details>
+{% endblock %}

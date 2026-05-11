@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}TLH Finder{% endblock %}
+
+{% block content %}
+  <h1>💰 Tax-Loss Harvest 候选</h1>
+  <p class="subtitle">应税账户中的浮亏仓位 — 卖出可实现资本损失抵税</p>
+  <div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>
+
+  {% if not rows %}
+    <p style="color:var(--fg-muted);padding:20px;background:var(--bg-subtle);border-radius:8px;">🎉 当前没有 taxable 账户的浮亏仓位 — 没 TLH 机会。</p>
+  {% else %}
+    <div class="status">
+      💡 共 <strong>{{ rows|length }}</strong> 个 TLH 候选 ·
+      总浮亏 <strong>${{ "{:,.0f}".format(total_loss) }}</strong> ·
+      估算抵税 <strong>${{ "{:,.0f}".format(total_savings) }}</strong>（按长期资本利得 23.8% 计算）
+    </div>
+    <table>
+      <thead><tr>
+        <th>Ticker</th><th>账户</th><th class="num">股数</th>
+        <th class="num">市值</th><th class="num">成本</th><th class="num">浮亏</th>
+        <th class="num">LT 抵税估算</th><th class="num">ST 抵税估算</th>
+      </tr></thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td><strong>{{ r.symbol }}</strong></td>
+          <td>{{ r.account_name }} <span class="tag" style="font-size:10px;">🏦 {{ r.broker or "?" }}</span></td>
+          <td class="num">{{ "%.3f"|format(r.quantity) }}</td>
+          <td class="num">${{ "{:,.0f}".format(r.current_value) }}</td>
+          <td class="num">${{ "{:,.0f}".format(r.cost_basis_total) }}</td>
+          <td class="num loss">−${{ "{:,.0f}".format(r.loss) }} ({{ "%.1f"|format(r.loss_pct) }}%)</td>
+          <td class="num gain">${{ "{:,.0f}".format(r.savings_lt) }}</td>
+          <td class="num gain">${{ "{:,.0f}".format(r.savings_st) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+
+  <details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-top:24px;border:1px solid var(--border);">
+    <summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 TLH 操作指南</summary>
+    <ul style="margin-top:12px;font-size:13px;line-height:1.7;">
+      <li><strong>什么是 TLH</strong>：Tax-Loss Harvesting — 卖出浮亏仓位 → 实现资本损失 → 抵消同年其他资本利得（或最多 $3,000 抵消普通收入）。</li>
+      <li><strong>税率假设</strong>：LT（长期持有 &gt;1 年）= 20% LTCG + 3.8% NIIT = 23.8%；ST（短期 ≤1 年）= 37% 最高边际税率 + 3.8% NIIT。</li>
+      <li><strong>Wash Sale Rule</strong>：卖出后 30 天内（前后各 30 天）不能买回 substantially identical 证券 — 否则 IRS 不让抵亏损。⚠️ 查 <a href="/wash-sale">Wash Sale Alert</a> 页面避免。</li>
+      <li><strong>替代品策略</strong>：卖 NVDA 想保持半导体敞口 → 买 SOXX/SMH ETF（不算 substantially identical）。</li>
+      <li><strong>结转</strong>：当年无法抵消的损失可结转到未来无限期。</li>
+    </ul>
+  </details>
+{% endblock %}

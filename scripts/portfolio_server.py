@@ -947,50 +947,13 @@ def wash_sale_view():
                     "estimated_loss": (avg_cost - sell["price"]) * sell["shares"],
                 })
 
-    body = []
-    body.append(f'<div class="status">扫描了 {len(sells)} 笔卖出 × {len(buys)} 笔买入。<strong>{len(alerts)}</strong> 个潜在 wash sale 警告。</div>')
-
-    if not alerts:
-        body.append('<p style="color:var(--fg-muted);padding:20px;background:var(--bg-subtle);border-radius:8px;">✅ 当前没有 wash sale 风险。</p>')
-    else:
-        body.append('<table><thead><tr><th>Ticker</th><th>卖出</th><th>买回</th><th class="num">间隔（天）</th><th class="num">受影响损失</th><th>风险</th></tr></thead><tbody>')
-        for a in alerts:
-            severity = "🔴 高" if abs(a["delta_days"]) <= 30 else ""
-            body.append(
-                f'<tr>'
-                f'<td><strong>{a["symbol"]}</strong></td>'
-                f'<td>{a["sell_date"]} · {a["sell_shares"]:.2f} @ ${a["sell_price"]:.2f}<br>'
-                f'<span style="font-size:11px;color:var(--fg-muted);">{a["sell_account"]}</span></td>'
-                f'<td>{a["buy_date"]} · {a["buy_shares"]:.2f} @ ${a["buy_price"]:.2f}<br>'
-                f'<span style="font-size:11px;color:var(--fg-muted);">{a["buy_account"]}</span></td>'
-                f'<td class="num">{a["delta_days"]:+d}</td>'
-                f'<td class="num loss">−${a["estimated_loss"]:,.0f}</td>'
-                f'<td>{severity}</td>'
-                f'</tr>'
-            )
-        body.append('</tbody></table>')
-
-    body.append('''
-<details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-top:24px;border:1px solid var(--border);">
-<summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 Wash Sale Rule 详解</summary>
-<ul style="margin-top:12px;font-size:13px;line-height:1.7;">
-<li><strong>定义</strong>：IRS 规则 — 卖出有损失的证券后 30 天内（前后各 30 天，<strong>61 天总窗口</strong>）买回 substantially identical 证券，损失不能抵税。</li>
-<li><strong>什么算 substantially identical</strong>：同一 ticker；同公司不同 share class（罕见）；密切跟踪同一指数的 ETF 之间也可能（争议）。</li>
-<li><strong>跨账户 + 跨配偶</strong>：⚠️ Wash sale rule 适用于<strong>你和配偶的全部账户</strong>（包括 401k / IRA）。所以这个工具扫描了所有账户的交易。</li>
-<li><strong>常见错误</strong>：401k 自动定投 + 同时在 taxable 卖出同一只股 → 触发 wash sale。</li>
-<li><strong>合法替代品</strong>：卖 VOO 想保持大盘敞口 → 买 IVV 或 SPLG（不同发行商但都跟踪 S&amp;P 500，争议小）。卖 NVDA → 买半导体 ETF（SOXX/SMH）肯定 OK。</li>
-<li><strong>后果</strong>：损失加到买回的 cost basis，所以税务上是 deferred 而不是 lost。但当年抵税计划被打乱。</li>
-</ul>
-</details>
-''')
-
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Wash Sale Alert</title><style>{CSS}</style></head><body><div class="container">
-<h1>🚫 Wash Sale 警告</h1>
-<p class="subtitle">检测 61 天窗口内"卖出损失 + 买回同票"的潜在违规</p>
-<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>
-{"".join(body)}
-</div></body></html>"""
+    return templates.TemplateResponse(
+        _dummy_request(), "wash_sale.html",
+        {
+            "css": CSS, "alerts": alerts,
+            "n_sells": len(sells), "n_buys": len(buys),
+        },
+    )
 
 
 @app.get("/correlation", response_class=HTMLResponse)
@@ -1082,45 +1045,22 @@ def correlation_view():
                 high_pairs.append((t1, t2, float(v)))
     high_pairs.sort(key=lambda x: -x[2])
 
-    high_pairs_html = ""
-    if high_pairs:
-        high_pairs_html = '<h3 style="margin-top:24px;">⚠️ 高度相关对（&gt; 0.85） — 隐性集中度</h3>'
-        high_pairs_html += '<p style="color:var(--fg-muted);font-size:13px;">这些 ticker 走势几乎一致 — 持有多个 = 没有真正分散。考虑只留一个或整合 ETF。</p>'
-        high_pairs_html += '<table><thead><tr><th>Ticker A</th><th>Ticker B</th><th class="num">相关系数</th></tr></thead><tbody>'
-        for t1, t2, v in high_pairs[:15]:
-            high_pairs_html += f'<tr><td><strong>{t1}</strong></td><td><strong>{t2}</strong></td><td class="num loss">{v:.3f}</td></tr>'
-        high_pairs_html += '</tbody></table>'
-
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>相关性热力图</title><style>{CSS}</style></head><body><div class="container">
-<h1>🔗 持仓相关性热力图</h1>
-<p class="subtitle">过去 90 天日收益率的皮尔逊相关系数 · top {n} 持仓</p>
-<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>
-<details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-bottom:16px;border:1px solid var(--border);">
-<summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 如何读热力图</summary>
-<ul style="margin-top:12px;font-size:13px;line-height:1.7;">
-<li><strong>红色 (1.0)</strong> = 走势完全一致 → 实际上是同一种暴露</li>
-<li><strong>白色 (0.0)</strong> = 完全独立 → 真分散</li>
-<li><strong>蓝色 (-1.0)</strong> = 完全反向 → 对冲</li>
-<li><strong>0.85+ 的对</strong>：考虑整合（持有多只 = 隐性集中度）</li>
-<li><strong>大盘 ETF (VOO/QQQ)</strong> 通常和大科技高相关 — 重复持有意义有限</li>
-</ul>
-</details>
-<div style="background:var(--bg-subtle);padding:20px;border-radius:8px;border:1px solid var(--border);overflow-x:auto;">
-{"".join(svg)}
-</div>
-{high_pairs_html}
-</div></body></html>"""
+    return templates.TemplateResponse(
+        _dummy_request(), "correlation.html",
+        {
+            "css": CSS, "n": n,
+            "svg": "".join(svg),
+            "high_pairs": high_pairs,
+        },
+    )
 
 
 @app.get("/tlh", response_class=HTMLResponse)
 def tlh_view():
     """Tax-Loss Harvest candidates: taxable accounts with unrealized losses."""
-    from tradingagents.portfolio.tax import estimate_sell_tax
-
     latest = latest_snapshot_date()
     with connect() as conn:
-        rows = conn.execute(
+        raw = conn.execute(
             """
             SELECT * FROM positions_snapshot
             WHERE import_date = ? AND account_type = 'Taxable'
@@ -1131,64 +1071,29 @@ def tlh_view():
             (latest,) if latest else (date.today().isoformat(),),
         ).fetchall()
 
-    if not rows:
-        body = '<p style="color:var(--fg-muted);padding:20px;background:var(--bg-subtle);border-radius:8px;">🎉 当前没有 taxable 账户的浮亏仓位 — 没 TLH 机会。</p>'
-        total_loss = 0.0
-        total_savings = 0.0
-    else:
-        body_rows = []
-        total_loss = 0.0
-        total_savings = 0.0
-        for r in rows:
-            loss = r["cost_basis_total"] - r["current_value"]
-            loss_pct = loss / r["cost_basis_total"] * 100 if r["cost_basis_total"] else 0
-            # Estimate tax savings (high bracket: 37% ST or 23.8% LT + NIIT)
-            # Assume long-term for conservative estimate
-            est_savings_lt = loss * 0.238  # 20% LTCG + 3.8% NIIT
-            est_savings_st = loss * 0.37
-            total_loss += loss
-            total_savings += est_savings_lt  # conservative
-            body_rows.append(
-                f'<tr>'
-                f'<td><strong>{r["symbol"]}</strong></td>'
-                f'<td>{r["account_name"]} <span class="tag" style="font-size:10px;">🏦 {r["broker"] or "?"}</span></td>'
-                f'<td class="num">{r["quantity"]:.3f}</td>'
-                f'<td class="num">${r["current_value"]:,.0f}</td>'
-                f'<td class="num">${r["cost_basis_total"]:,.0f}</td>'
-                f'<td class="num loss">−${loss:,.0f} ({loss_pct:.1f}%)</td>'
-                f'<td class="num gain">${est_savings_lt:,.0f}</td>'
-                f'<td class="num gain">${est_savings_st:,.0f}</td>'
-                f'</tr>'
-            )
-        body = f'''
-<div class="status">
-  💡 共 <strong>{len(rows)}</strong> 个 TLH 候选 · 总浮亏 <strong>${total_loss:,.0f}</strong> ·
-  估算抵税 <strong>${total_savings:,.0f}</strong>（按长期资本利得 23.8% 计算）
-</div>
-<table><thead><tr>
-<th>Ticker</th><th>账户</th><th class="num">股数</th><th class="num">市值</th><th class="num">成本</th><th class="num">浮亏</th>
-<th class="num">LT 抵税估算</th><th class="num">ST 抵税估算</th>
-</tr></thead><tbody>{"".join(body_rows)}</tbody></table>
+    rows = []
+    total_loss = 0.0
+    total_savings = 0.0
+    for r in raw:
+        loss = r["cost_basis_total"] - r["current_value"]
+        loss_pct = loss / r["cost_basis_total"] * 100 if r["cost_basis_total"] else 0
+        savings_lt = loss * 0.238  # 20% LTCG + 3.8% NIIT
+        savings_st = loss * 0.37
+        total_loss += loss
+        total_savings += savings_lt
+        rows.append({
+            **dict(r),
+            "loss": loss, "loss_pct": loss_pct,
+            "savings_lt": savings_lt, "savings_st": savings_st,
+        })
 
-<details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-top:24px;border:1px solid var(--border);">
-<summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 TLH 操作指南</summary>
-<ul style="margin-top:12px;font-size:13px;line-height:1.7;">
-<li><strong>什么是 TLH</strong>：Tax-Loss Harvesting — 卖出浮亏仓位 → 实现资本损失 → 抵消同年其他资本利得（或最多 $3,000 抵消普通收入）。</li>
-<li><strong>税率假设</strong>：LT（长期持有 &gt;1 年）= 20% LTCG + 3.8% NIIT = 23.8%；ST（短期 ≤1 年）= 37% 最高边际税率 + 3.8% NIIT。</li>
-<li><strong>Wash Sale Rule</strong>：卖出后 30 天内（前后各 30 天）不能买回 substantially identical 证券 — 否则 IRS 不让抵亏损。⚠️ 查 <a href="/wash-sale">Wash Sale Alert</a> 页面避免。</li>
-<li><strong>替代品策略</strong>：卖 NVDA 想保持半导体敞口 → 买 SOXX/SMH ETF（不算 substantially identical）。</li>
-<li><strong>结转</strong>：当年无法抵消的损失可结转到未来无限期。</li>
-</ul>
-</details>
-'''
-
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TLH Finder</title><style>{CSS}</style></head><body><div class="container">
-<h1>💰 Tax-Loss Harvest 候选</h1>
-<p class="subtitle">应税账户中的浮亏仓位 — 卖出可实现资本损失抵税</p>
-<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>
-{body}
-</div></body></html>"""
+    return templates.TemplateResponse(
+        _dummy_request(), "tlh.html",
+        {
+            "css": CSS, "rows": rows,
+            "total_loss": total_loss, "total_savings": total_savings,
+        },
+    )
 
 
 @app.get("/drift", response_class=HTMLResponse)
@@ -1253,45 +1158,18 @@ def drift_view():
         return (rating_priority, -r["drift_score"])
     rows.sort(key=priority)
 
-    body = [
-        '<h1>⚠️ Position Drift Alert</h1>',
-        '<p class="subtitle">PM 评级 vs 当前组合权重的错配 — 越靠前越紧迫</p>',
-        '<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>',
-        '''<details style="background:var(--bg-subtle);border-radius:8px;padding:12px 16px;margin-bottom:16px;border:1px solid var(--border);">
-<summary style="cursor:pointer;font-weight:500;font-size:14px;">📘 如何读这个表</summary>
-<ul style="margin-top:12px;font-size:13px;color:var(--fg-muted);">
-<li>🔴 <strong>紧迫减仓</strong>：PM 评级 Sell 且组合权重 > 0.5%</li>
-<li>🟡 <strong>应减仓</strong>：PM 评级 Underweight 且权重 > 2%</li>
-<li>🔵 <strong>加仓空间</strong>：PM 评级 Buy/Overweight 但当前权重 < 0.5%</li>
-<li>✓ <strong>充分</strong>：Buy/Overweight 且权重 > 1.5%（已合理配置）</li>
-<li>— <strong>Hold</strong>：评级中性，不需 drift action</li>
-</ul>
-</details>''',
-        '<table><thead><tr><th>Ticker</th><th>评级</th><th class="num">当前价值</th><th class="num">组合权重</th><th>Drift 状态</th></tr></thead><tbody>',
-    ]
     for r in rows:
         weight_class = ""
-        if r["weight"] > 15: weight_class = "loss"
-        elif r["weight"] < 0.3 and r["rating"] in ("Buy", "Overweight"): weight_class = "loss"
-        body.append(
-            f'<tr><td><strong>{r["symbol"]}</strong></td>'
-            f'<td><span class="tag tag-{r["rating"].lower()}" style="padding:2px 8px;">{r["rating"]}</span></td>'
-            f'<td class="num">${r["value"]:,.0f}</td>'
-            f'<td class="num {weight_class}">{r["weight"]:.2f}%</td>'
-            f'<td>{r["action"]}</td></tr>'
-        )
-    body.append('</tbody></table>')
+        if r["weight"] > 15:
+            weight_class = "loss"
+        elif r["weight"] < 0.3 and r["rating"] in ("Buy", "Overweight"):
+            weight_class = "loss"
+        r["weight_class"] = weight_class
 
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Drift Alert</title><style>{CSS}
-.tag-buy {{ background: color-mix(in srgb, var(--success) 30%, transparent); color: var(--success); }}
-.tag-overweight {{ background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); }}
-.tag-hold {{ background: var(--border); color: var(--fg-muted); }}
-.tag-underweight {{ background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }}
-.tag-sell {{ background: color-mix(in srgb, var(--danger) 30%, transparent); color: var(--danger); }}
-</style></head><body><div class="container">
-{''.join(body)}
-</div></body></html>"""
+    return templates.TemplateResponse(
+        _dummy_request(), "drift.html",
+        {"css": CSS, "rows": rows},
+    )
 
 
 @app.get("/performance", response_class=HTMLResponse)
