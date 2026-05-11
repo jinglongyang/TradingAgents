@@ -566,9 +566,9 @@ def add(
                 "UPDATE positions_snapshot SET owner = ? WHERE account_id = ? AND owner IS NULL",
                 (owner.strip(), account_id.strip()),
             )
-        # PRG pattern: always redirect (anchor if provided) so the browser keeps
-        # its position instead of jumping to the top on a re-render.
-        anchor = redirect_anchor or ("acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", account_id.strip()))
+        # Always derive anchor from account_id (ignore any stale redirect_anchor
+        # from a recycled modal — JS reuses one form element across accounts).
+        anchor = "acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", account_id.strip())
         return RedirectResponse(url=f"/#{anchor}", status_code=303)
         msg = f'<div class="msg success">✓ 已添加 <strong>{symbol.upper()}</strong> 到 {account_name}</div>'
     except Exception as e:  # noqa: BLE001
@@ -629,7 +629,7 @@ def account_edit(
                 (account_name.strip(), account_type, broker, owner.strip(), account_id),
             )
             n = cur.rowcount
-        anchor = redirect_anchor or ("acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", account_id))
+        anchor = "acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", account_id)
         return RedirectResponse(url=f"/#{anchor}", status_code=303)
     except Exception as e:  # noqa: BLE001
         return _render(message=f'<div class="msg error">✗ 错误: {e}</div>')
@@ -660,7 +660,8 @@ def edit(
                  cost, cost / quantity if quantity else 0.0, broker, snapshot_id),
             )
             row = conn.execute("SELECT account_id FROM positions_snapshot WHERE snapshot_id = ?", (snapshot_id,)).fetchone()
-        anchor = redirect_anchor or (("acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", row["account_id"])) if row else "")
+        # Always derive from account_id, ignore stale redirect_anchor
+        anchor = ("acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", row["account_id"])) if row else ""
         return RedirectResponse(url=f"/#{anchor}" if anchor else "/", status_code=303)
     except Exception as e:  # noqa: BLE001
         return _render(message=f'<div class="msg error">✗ 错误: {e}</div>')
@@ -711,7 +712,7 @@ def sell(
                         (new_qty, new_value, price, row["snapshot_id"]),
                     )
 
-        anchor = redirect_anchor or ("acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", account_id))
+        anchor = "acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", account_id)
         return RedirectResponse(url=f"/#{anchor}", status_code=303)
     except Exception as e:  # noqa: BLE001
         return _render(message=f'<div class="msg error">✗ 错误: {e}</div>')
