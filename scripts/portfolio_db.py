@@ -35,8 +35,10 @@ load_dotenv(find_dotenv(usecwd=True))
 
 from tradingagents.portfolio_db import (  # noqa: E402
     DEFAULT_DB_PATH,
+    add_position,
     connect,
     import_csv_snapshot,
+    import_manual_snapshot,
     init_db,
     latest_snapshot_date,
     list_executions,
@@ -63,6 +65,38 @@ def cmd_import_csv(args) -> int:
     )
     print(f"Imported {result['files']} file(s) → "
           f"{result['inserted']} new + {result['updated']} updated rows")
+    return 0
+
+
+def cmd_import_manual(args) -> int:
+    """Import positions from a manually-edited CSV (Robinhood / Schwab / etc.)."""
+    if not args.csv:
+        print("Need at least one --csv path", file=sys.stderr)
+        return 2
+    result = import_manual_snapshot(
+        csv_paths=[Path(p) for p in args.csv],
+        import_date=args.date,
+        db_path=args.db,
+    )
+    print(f"Imported {result['files']} manual file(s) → "
+          f"{result['inserted']} new + {result['updated']} updated rows")
+    return 0
+
+
+def cmd_add_position(args) -> int:
+    """Add a single position interactively or via flags."""
+    rc = add_position(
+        account_id=args.account_id,
+        account_name=args.account_name,
+        account_type=args.account_type,
+        symbol=args.symbol,
+        quantity=args.quantity,
+        last_price=args.price or 0.0,
+        cost_basis_total=args.cost_basis or 0.0,
+        import_date=args.date,
+        db_path=args.db,
+    )
+    print(f"Added/updated {rc} position(s): {args.symbol.upper()} in {args.account_name}")
     return 0
 
 
@@ -183,10 +217,32 @@ def main() -> int:
 
     sub.add_parser("init").set_defaults(func=cmd_init)
 
-    p = sub.add_parser("import-csv")
+    p = sub.add_parser("import-csv", help="Import Fidelity-format CSV.")
     p.add_argument("csv", nargs="+")
     p.add_argument("--date", help="YYYY-MM-DD; defaults to today")
     p.set_defaults(func=cmd_import_csv)
+
+    p = sub.add_parser(
+        "import-manual",
+        help="Import a manually-edited positions CSV (Robinhood / Schwab / etc.).",
+    )
+    p.add_argument("csv", nargs="+", help="Path(s) to manual CSV. See templates/manual_positions.csv")
+    p.add_argument("--date", help="YYYY-MM-DD; defaults to today")
+    p.set_defaults(func=cmd_import_manual)
+
+    p = sub.add_parser(
+        "add-position",
+        help="Add a single position (one-off, e.g. quick Robinhood entry).",
+    )
+    p.add_argument("--account-id", required=True)
+    p.add_argument("--account-name", required=True)
+    p.add_argument("--account-type", choices=["Roth", "TaxDeferred", "Taxable", "ChildEdu", "Unknown"])
+    p.add_argument("--symbol", required=True)
+    p.add_argument("--quantity", type=float, required=True)
+    p.add_argument("--price", type=float, help="Current market price (optional)")
+    p.add_argument("--cost-basis", type=float, help="Total cost basis (optional)")
+    p.add_argument("--date", help="YYYY-MM-DD; defaults to today")
+    p.set_defaults(func=cmd_add_position)
 
     sub.add_parser("status").set_defaults(func=cmd_status)
 

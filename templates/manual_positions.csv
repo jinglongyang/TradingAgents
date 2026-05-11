@@ -1,0 +1,4 @@
+account_id,account_name,account_type,symbol,quantity,last_price,cost_basis_total
+RH-IND,Robinhood Individual,Taxable,AAPL,10,293.05,2500
+RH-IND,Robinhood Individual,Taxable,NVDA,15,215.20,2800
+RH-ROTH,Robinhood Roth,Roth,AMZN,5,272.68,1200

@@ -12,7 +12,9 @@ from tradingagents.portfolio_db.db import (
     init_db,
 )
 from tradingagents.portfolio_db.snapshots import (
+    add_position,
     import_csv_snapshot,
+    import_manual_snapshot,
     latest_snapshot_date,
     snapshot_age_days,
 )
@@ -26,7 +28,9 @@ __all__ = [
     "DEFAULT_DB_PATH",
     "connect",
     "init_db",
+    "add_position",
     "import_csv_snapshot",
+    "import_manual_snapshot",
     "latest_snapshot_date",
     "snapshot_age_days",
     "record_execution",
