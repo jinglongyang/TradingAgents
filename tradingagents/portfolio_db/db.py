@@ -176,4 +176,15 @@ def init_db(db_path: Path | None = None) -> Path:
         if "instruction" not in decision_cols:
             conn.execute("ALTER TABLE decisions ADD COLUMN instruction TEXT")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_decisions_instruction ON decisions (symbol, instruction)")
+
+        # Per-account cash balance for budget-constrained allocation on /today
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS account_cash (
+                account_id   TEXT PRIMARY KEY,
+                cash         REAL NOT NULL DEFAULT 0,
+                updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
     return path

@@ -1705,6 +1705,28 @@ def _priority_score(item: dict) -> float:
     return rating * 1000 + tax * 100 + math.log10(value + 1) * 10
 
 
+@app.post("/account-cash")
+def set_account_cash(account_id: str = Form(...), cash: float = Form(0.0)):
+    """Persist the user-entered cash balance for one account.
+
+    Used by /today to drive budget-constrained allocation. Cash sits in a
+    tiny standalone table — broker statements aren't imported, this is a
+    purely manual field the user updates after checking each account.
+    """
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO account_cash (account_id, cash, updated_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(account_id) DO UPDATE SET
+                cash = excluded.cash,
+                updated_at = excluded.updated_at
+            """,
+            (account_id.strip(), max(cash, 0)),
+        )
+    return RedirectResponse(url="/today", status_code=303)
+
+
 @app.get("/today", response_class=HTMLResponse)
 def today_view():
     """Consolidated execution list grouped by account.
@@ -1793,8 +1815,16 @@ def today_view():
             }
         by_account[aid][it["bucket"] + "s"].append(it)
 
+    # Load user-entered cash balances (init_db creates the table)
+    with connect() as conn:
+        cash_rows = conn.execute("SELECT account_id, cash FROM account_cash").fetchall()
+    account_cash = {r["account_id"]: r["cash"] for r in cash_rows}
+
     # Per-account: sort reduces by $ desc (biggest derisk first), adds by
-    # priority score desc (most important first when cash runs out).
+    # priority score desc (most important first when cash runs out). Then
+    # greedy-allocate available cash (user-entered + reduce proceeds) down
+    # the prioritised add list so the user can see exactly which adds are
+    # fundable, partially fundable, or blocked by the budget.
     accounts = []
     for acct in by_account.values():
         acct["reduces"].sort(key=lambda x: -(x["est_value"] or 0))
@@ -1803,6 +1833,28 @@ def today_view():
         acct["cash_out"] = sum((x["est_value"] or 0) for x in acct["adds"])
         acct["net"] = acct["cash_in"] - acct["cash_out"]
         acct["has_action"] = bool(acct["reduces"] or acct["adds"])
+        acct["existing_cash"] = account_cash.get(acct["account_id"], 0)
+        acct["available"] = acct["existing_cash"] + acct["cash_in"]
+
+        budget = acct["available"]
+        for add in acct["adds"]:
+            need = add["est_value"] or 0
+            if need <= 0:
+                add["alloc_status"] = "unknown"
+                add["alloc_amount"] = 0
+                continue
+            if budget >= need:
+                add["alloc_status"] = "full"
+                add["alloc_amount"] = need
+                budget -= need
+            elif budget > 0:
+                add["alloc_status"] = "partial"
+                add["alloc_amount"] = budget
+                budget = 0
+            else:
+                add["alloc_status"] = "skip"
+                add["alloc_amount"] = 0
+        acct["leftover"] = budget
         accounts.append(acct)
 
     # Account order: those with actions first, sorted by total $ activity desc;
