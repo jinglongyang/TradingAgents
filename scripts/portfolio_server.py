@@ -1691,18 +1691,45 @@ _ACTION_BUCKETS = {
 }
 _RATING_WEIGHT = {"Buy": 3, "Overweight": 2, "Hold": 1, "Underweight": 0, "Sell": -1}
 _TAX_WEIGHT = {"TaxDeferred": 3, "Roth": 3, "ChildEdu": 2, "Taxable": 1, "Unknown": 1}
+_PRICE_TARGET_RE = re.compile(r"\*\*Price Target[^*]*\*\*:\s*\$?([\d.]+)", re.IGNORECASE)
+_STOP_LOSS_RE = re.compile(r"\*\*Stop Loss\*\*:\s*\$?([\d.]+)", re.IGNORECASE)
+
+
+def _extract_price_levels(md: str) -> tuple[float | None, float | None]:
+    """Pull (price_target, stop_loss) out of a decision's markdown body.
+
+    Returns (None, None) when fields are absent (some old decisions and most
+    holdings-only PMs don't include explicit targets)."""
+    if not md:
+        return None, None
+    pt = _PRICE_TARGET_RE.search(md)
+    sl = _STOP_LOSS_RE.search(md)
+    try:
+        pt_val = float(pt.group(1)) if pt else None
+    except ValueError:
+        pt_val = None
+    try:
+        sl_val = float(sl.group(1)) if sl else None
+    except ValueError:
+        sl_val = None
+    return pt_val, sl_val
 
 
 def _priority_score(item: dict) -> float:
     """Higher = do first. Composite of rating strength, account tax efficiency,
-    and dollar magnitude (log so a $50 token-buy doesn't dominate a $5000 buy
-    by orders of magnitude). Reduce items use the same formula but get sorted
-    by raw est_value separately."""
+    expected return (price target vs current price), and dollar magnitude.
+
+    Weights are chosen so rating dominates the ordering, then tax-efficiency,
+    then expected_return acts as a tiebreaker among same-rating same-tax
+    picks (e.g. two Overweight buys in a 401k — favour the one with more
+    upside to target). Dollar magnitude only matters at the margins."""
     import math
     rating = _RATING_WEIGHT.get(item.get("rating"), 1)
     tax = _TAX_WEIGHT.get(item.get("account_type"), 1)
     value = max(item.get("est_value") or 0, 0)
-    return rating * 1000 + tax * 100 + math.log10(value + 1) * 10
+    exp_return = item.get("expected_return")  # fraction, e.g. 0.18 = +18%
+    return_bonus = (exp_return * 100 * 10) if exp_return is not None else 0
+    return rating * 10000 + tax * 1000 + return_bonus + math.log10(value + 1) * 5
 
 
 @app.post("/account-cash")
@@ -1744,7 +1771,8 @@ def today_view():
         ).fetchone()
         trade_date = latest_row["d"] if latest_row else None
         decisions = conn.execute(
-            "SELECT symbol, rating, account_actions FROM decisions WHERE trade_date = ? ORDER BY symbol",
+            "SELECT symbol, rating, account_actions, final_decision "
+            "FROM decisions WHERE trade_date = ? ORDER BY symbol",
             (trade_date,),
         ).fetchall() if trade_date else []
         snapshot = {
@@ -1773,6 +1801,7 @@ def today_view():
     items: list[dict] = []
     for d in decisions:
         actions = _json.loads(d["account_actions"]) if d["account_actions"] else []
+        price_target, stop_loss = _extract_price_levels(d["final_decision"])
         for a in actions:
             account_name = a.get("account_name", "")
             account_id = name_to_account.get(account_name) or f"name:{account_name}"
@@ -1782,6 +1811,13 @@ def today_view():
             size_pct = a.get("size_pct")
             est_shares = (qty * size_pct / 100.0) if (qty and size_pct) else None
             est_value = (est_shares * price) if (est_shares and price) else None
+
+            # Expected return = upside to PM's 12m target. Downside = drop to
+            # stop loss. Risk/reward ratio is exposed so the user can compare
+            # picks beyond rating + dollar size.
+            expected_return = ((price_target - price) / price) if (price_target and price and price > 0) else None
+            downside = ((price - stop_loss) / price) if (stop_loss and price and price > 0) else None
+            rr_ratio = (expected_return / downside) if (expected_return and downside and downside > 0) else None
 
             items.append({
                 "ticker": d["symbol"],
@@ -1795,6 +1831,11 @@ def today_view():
                 "current_price": price,
                 "est_shares": est_shares,
                 "est_value": est_value,
+                "price_target": price_target,
+                "stop_loss": stop_loss,
+                "expected_return": expected_return,
+                "downside": downside,
+                "rr_ratio": rr_ratio,
                 "rationale": a.get("rationale", ""),
                 "bucket": _ACTION_BUCKETS.get(a.get("action", ""), "hold"),
             })
