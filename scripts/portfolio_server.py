@@ -121,6 +121,18 @@ function openAccountEdit(acctId, acctName, currentBroker, currentType, currentOw
     document.getElementById('acct-delete-id').value = acctId;
     openModal('acct-edit-modal');
 }
+function deleteRow(snapshotId, symbol) {
+    if (!confirm(`确认删除 ${symbol} 这一行？\\n\\n这是数据修正操作，不会记入 executions。\\n如果是卖出实仓，请用 Sell 按钮。`)) return;
+    let form = document.createElement('form');
+    form.method = 'POST';
+    form.action = '/delete-row';
+    let inp = document.createElement('input');
+    inp.name = 'snapshot_id';
+    inp.value = snapshotId;
+    form.appendChild(inp);
+    document.body.appendChild(form);
+    form.submit();
+}
 function openAddToAccount(acctId, acctName, broker, accType, owner) {
     // Open the add-modal pre-filled with this account's metadata
     document.querySelector('#add-modal input[name="account_id"]').value = acctId;
@@ -214,6 +226,8 @@ def _build_holdings_view():
         <td class="actions">
           <button class="small secondary" onclick="openEdit({r['snapshot_id']}, '{r['symbol']}', {r['quantity']}, {r['last_price']}, {cost}, '{r['broker'] or 'Fidelity'}')">Edit</button>
           <button class="small danger" onclick="openSell('{r['symbol']}', '{aid}', '{aname}', {r['quantity']})">Sell</button>
+          <button class="small" style="background:transparent;color:var(--fg-muted);border:1px solid var(--border);"
+                  onclick="deleteRow({r['snapshot_id']}, '{r['symbol']}')" title="删除该行（数据错误时用，不记入交易）">🗑️</button>
         </td>
       </tr>''')
         out.append('</tbody></table></div>')
@@ -530,6 +544,22 @@ def add(
     except Exception as e:  # noqa: BLE001
         msg = f'<div class="msg error">✗ 错误: {e}</div>'
     return _render(message=msg)
+
+
+@app.post("/delete-row")
+def delete_row(snapshot_id: int = Form(...)):
+    """Hard-delete a single positions_snapshot row. Use for data correction
+    (e.g. duplicate import, wrong ticker). Does NOT record an execution."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT symbol, account_id FROM positions_snapshot WHERE snapshot_id = ?",
+            (snapshot_id,),
+        ).fetchone()
+        if not row:
+            return _render(message='<div class="msg error">行不存在</div>')
+        conn.execute("DELETE FROM positions_snapshot WHERE snapshot_id = ?", (snapshot_id,))
+        anchor = "acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", row["account_id"])
+    return RedirectResponse(url=f"/#{anchor}", status_code=303)
 
 
 @app.post("/account-delete", response_class=HTMLResponse)
