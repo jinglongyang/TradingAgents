@@ -224,9 +224,11 @@ def _render(message: str = ""):
 
   <div class="toolbar">
     <button onclick="openModal('add-modal')">➕ 添加新持仓</button>
+    <button class="success" onclick="openModal('run-modal')">🚀 运行 PM 分析</button>
     <a class="btn secondary" href="/owners">👥 按 Owner 看</a>
     <a class="btn secondary" href="/drift">⚠️ Drift Alert</a>
     <a class="btn secondary" href="/decisions">📋 PM 分析 & 评级</a>
+    <a class="btn secondary" href="/runs">🏃 运行历史</a>
     <a class="btn secondary" href="/executions">📒 交易记录</a>
     <a class="btn secondary" href="/api/positions" target="_blank">View JSON</a>
   </div>
@@ -309,6 +311,51 @@ def _render(message: str = ""):
     </form>
   </div>
 </div>
+
+<!-- Run Analysis Modal -->
+<div class="modal-backdrop" id="run-modal">
+  <div class="modal" style="max-width:560px;">
+    <h3>🚀 运行 PM 分析</h3>
+    <form method="post" action="/run">
+      <div class="field">
+        <label>分析类型</label>
+        <select name="mode" onchange="toggleRunMode(this.value)">
+          <option value="tickers" selected>📊 Ticker 列表分析（持仓 / 新股票 / 单只）</option>
+          <option value="sector">🏭 行业分析（LLM 推荐 ticker + 逐个分析）</option>
+          <option value="all">📈 全部持仓重跑（所有持仓 ticker）</option>
+        </select>
+      </div>
+
+      <div class="field" id="run-tickers-field">
+        <label>Ticker(s) <span class="hint">逗号分隔，如 NVDA,CRWV 或 IREN（持仓 ticker 带账户上下文，新 ticker 用探索性分析）</span></label>
+        <input name="tickers" placeholder="NVDA,CRWV 或 IREN">
+      </div>
+
+      <div class="field" id="run-sector-field" style="display:none;">
+        <label>行业 / 主题描述 <span class="hint">中文 OK，如 "AI 算力" / "GLP-1 减肥药" / "半导体周期"</span></label>
+        <input name="sector" placeholder="AI infrastructure 或 GLP-1 减肥药">
+        <p style="margin-top:6px;font-size:12px;color:var(--fg-muted);">系统会让 LLM 列 5-10 个该行业的代表性 ticker，逐个跑分析，最后给推荐 / 不推荐汇总。</p>
+      </div>
+
+      <div class="field">
+        <label>额外指令 <span class="hint">可选，注入到 PM prompt（如税务约束 / 时间窗口）</span></label>
+        <textarea name="instruction" rows="3" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-family:inherit;font-size:14px;resize:vertical;" placeholder="例如：我下个月房产购买，避免 $5K+ 资本利得；优先 TLH"></textarea>
+      </div>
+
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+        <button type="button" class="secondary" onclick="closeModal('run-modal')">取消</button>
+        <button type="submit" class="success">🚀 启动分析</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+function toggleRunMode(mode) {{
+    document.getElementById('run-tickers-field').style.display = mode === 'tickers' ? '' : 'none';
+    document.getElementById('run-sector-field').style.display = mode === 'sector' ? '' : 'none';
+}}
+</script>
 
 <!-- Account-level Edit Modal -->
 <div class="modal-backdrop" id="acct-edit-modal">
@@ -876,6 +923,197 @@ def executions_view():
     return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>交易记录</title><style>{CSS}</style></head><body><div class="container">
 {''.join(body)}
+</div></body></html>"""
+
+
+@app.post("/run", response_class=HTMLResponse)
+def run_analysis(
+    mode: str = Form("tickers"),
+    tickers: str = Form(""),
+    sector: str = Form(""),
+    instruction: str = Form(""),
+):
+    """Spawn analysis subprocess for tickers / sector / full portfolio."""
+    import os as _os
+    import subprocess as _sp
+    from datetime import datetime as _dt
+
+    run_id = _dt.now().strftime("%Y%m%d_%H%M%S")
+    log_path = f"/tmp/pm_run_{run_id}.log"
+    status_path = f"/tmp/pm_run_{run_id}.status"
+    project_root = Path(__file__).resolve().parent.parent
+    env = dict(_os.environ)
+    if instruction.strip():
+        env["USER_TAX_CONTEXT"] = instruction.strip()
+
+    if mode == "sector":
+        if not sector.strip():
+            return _render(message='<div class="msg error">没有提供行业描述</div>')
+        cmd_chain = [
+            f"uv run python scripts/analyze_sector.py --sector '{sector.strip()}'",
+            "uv run python scripts/migrate_decisions_to_db.py",
+        ]
+        with open(status_path, "w") as f:
+            f.write(f"queued\nmode=sector\nsector={sector}\ninstruction={instruction[:200]}\n")
+        full_cmd = (
+            f"echo running > {status_path} && "
+            + " && ".join(cmd_chain)
+            + f" && echo done > {status_path}; echo failed >> {status_path}"
+        )
+        _sp.Popen(["sh", "-c", full_cmd], env=env, cwd=str(project_root),
+                  stdout=open(log_path, "w"), stderr=_sp.STDOUT, start_new_session=True)
+        msg = (
+            f'<div class="msg success">🏭 已启动行业分析 <code>{run_id}</code>: <strong>{sector}</strong>'
+            f'{" · 已注入自定义指令" if instruction.strip() else ""}<br>'
+            f'LLM 先列 ticker 再逐个跑（5-10 个 × 2 分钟 ≈ 15 分钟）· '
+            f'<a href="/runs">查看进度</a></div>'
+        )
+        return _render(message=msg)
+
+    if mode == "all":
+        # Use all currently-held tickers
+        latest = latest_snapshot_date()
+        if latest:
+            with connect() as conn:
+                held_rows = conn.execute(
+                    "SELECT DISTINCT symbol FROM positions_snapshot WHERE import_date = ?",
+                    (latest,),
+                ).fetchall()
+            ticker_list = [r["symbol"] for r in held_rows]
+        else:
+            ticker_list = []
+        if not ticker_list:
+            return _render(message='<div class="msg error">没有持仓数据可分析</div>')
+    else:
+        ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+        if not ticker_list:
+            return _render(message='<div class="msg error">没有提供 ticker</div>')
+
+    # Classify each ticker: held vs new
+    latest = latest_snapshot_date()
+    held: set[str] = set()
+    if latest:
+        with connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT symbol FROM positions_snapshot WHERE import_date = ?",
+                (latest,),
+            ).fetchall()
+            held = {r["symbol"] for r in rows}
+
+    held_tickers = [t for t in ticker_list if t in held]
+    new_tickers = [t for t in ticker_list if t not in held]
+
+    run_id = _dt.now().strftime("%Y%m%d_%H%M%S")
+    log_path = f"/tmp/pm_run_{run_id}.log"
+    status_path = f"/tmp/pm_run_{run_id}.status"
+    project_root = Path(__file__).resolve().parent.parent
+
+    # Build env with optional user instruction override
+    env = dict(_os.environ)
+    if instruction.strip():
+        env["USER_TAX_CONTEXT"] = instruction.strip()
+
+    # Write status: queued
+    with open(status_path, "w") as f:
+        f.write(f"queued\ntickers={','.join(ticker_list)}\nheld={','.join(held_tickers)}\nnew={','.join(new_tickers)}\ninstruction={instruction[:200]}\n")
+
+    cmds = []
+    if held_tickers:
+        cmds.append(f"uv run python scripts/analyze_holdings.py --tickers {','.join(held_tickers)}")
+    for t in new_tickers:
+        cmds.append(f"uv run python scripts/analyze_new_ticker.py --ticker {t}")
+    cmds.append("uv run python scripts/migrate_decisions_to_db.py")
+    full_cmd = (
+        f"echo running > {status_path} && "
+        + " && ".join(cmds)
+        + f" && echo done > {status_path}; echo failed >> {status_path}"
+    )
+
+    _sp.Popen(
+        ["sh", "-c", full_cmd],
+        env=env,
+        cwd=str(project_root),
+        stdout=open(log_path, "w"),
+        stderr=_sp.STDOUT,
+        start_new_session=True,
+    )
+
+    desc = []
+    if held_tickers:
+        desc.append(f"{len(held_tickers)} 只持仓股: {', '.join(held_tickers)}")
+    if new_tickers:
+        desc.append(f"{len(new_tickers)} 只新股: {', '.join(new_tickers)}")
+    instr_note = " · 已注入自定义指令" if instruction.strip() else ""
+    msg = (
+        f'<div class="msg success">🚀 已启动 run <code>{run_id}</code>: {" + ".join(desc)}{instr_note}<br>'
+        f'<a href="/runs">查看进度</a> · 跑完后去 <a href="/decisions">PM 评级</a> 看结果</div>'
+    )
+    return _render(message=msg)
+
+
+@app.get("/runs", response_class=HTMLResponse)
+def runs_view():
+    """List all pm_run_*.log files with their current status."""
+    import glob as _g
+    logs = sorted(_g.glob("/tmp/pm_run_*.log"), reverse=True)[:20]
+
+    body = ['<h1>🏃 运行历史</h1>',
+            '<p class="subtitle">最近 20 次分析任务</p>',
+            '<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>']
+
+    if not logs:
+        body.append('<p style="color:var(--fg-muted);">还没运行过分析 — 用主页 🚀 按钮启动</p>')
+    else:
+        body.append('<table><thead><tr><th>Run ID</th><th>状态</th><th>触发 ticker</th><th>最近活动</th><th></th></tr></thead><tbody>')
+        for log in logs:
+            run_id = log.replace("/tmp/pm_run_", "").replace(".log", "")
+            status_path = log.replace(".log", ".status")
+            status = "unknown"
+            tickers = ""
+            if Path(status_path).exists():
+                content = Path(status_path).read_text()
+                status = content.splitlines()[0] if content else "?"
+                for line in content.splitlines():
+                    if line.startswith("tickers="):
+                        tickers = line.split("=", 1)[1]
+            # last log line
+            last_line = ""
+            try:
+                with open(log) as f:
+                    last_line = f.readlines()[-1] if f.readlines else ""
+            except Exception:
+                pass
+            badge = {"running": "🟡 进行中", "done": "✅ 完成", "failed": "❌ 失败", "queued": "⏳ 排队"}.get(status, status)
+            body.append(
+                f'<tr><td><code>{run_id}</code></td>'
+                f'<td>{badge}</td>'
+                f'<td>{tickers}</td>'
+                f'<td style="font-size:11px;color:var(--fg-muted);">{last_line[:80]}</td>'
+                f'<td><a href="/runs/{run_id}" class="btn small secondary">日志</a></td></tr>'
+            )
+        body.append('</tbody></table>')
+
+    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>运行历史</title><style>{CSS}</style>
+<meta http-equiv="refresh" content="10">
+</head><body><div class="container">
+{''.join(body)}
+<p style="color:var(--fg-muted);font-size:12px;margin-top:24px;">页面每 10 秒自动刷新</p>
+</div></body></html>"""
+
+
+@app.get("/runs/{run_id}", response_class=HTMLResponse)
+def run_detail(run_id: str):
+    log_path = f"/tmp/pm_run_{run_id}.log"
+    if not Path(log_path).exists():
+        return HTMLResponse(f"<p>Run {run_id} 不存在</p><a href='/runs'>← Back</a>")
+    log_content = Path(log_path).read_text()[-10000:]  # tail
+    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Run {run_id}</title><style>{CSS}
+pre {{ background: var(--bg-subtle); padding: 16px; border-radius: 6px; overflow-x: auto; font-size: 12px; max-height: 70vh; overflow-y: auto; }}
+</style></head><body><div class="container">
+<h1>Run {run_id}</h1>
+<div style="margin-bottom:16px;"><a class="btn secondary" href="/runs">← 运行列表</a></div>
+<pre>{log_content}</pre>
 </div></body></html>"""
 
 
