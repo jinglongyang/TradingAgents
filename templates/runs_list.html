@@ -4,22 +4,44 @@
 
 {% block content %}
   <h1>🏃 运行历史</h1>
-  <p class="subtitle">最近 20 次分析任务</p>
+  <p class="subtitle">最近 20 次分析任务 · 5 分钟无日志活动自动标记超时 · PID 消失标记为已退出</p>
   <div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>
 
   {% if runs %}
     <table>
-      <thead><tr><th>Run ID</th><th>状态</th><th>触发 ticker</th><th>最近活动</th><th>操作</th></tr></thead>
+      <thead>
+        <tr>
+          <th>Run ID</th>
+          <th>状态</th>
+          <th>Ticker / 行业</th>
+          <th>额外指令</th>
+          <th>最近活动</th>
+          <th>操作</th>
+        </tr>
+      </thead>
       <tbody>
         {% for r in runs %}
         <tr>
           <td><code>{{ r.run_id }}</code></td>
           <td>{{ r.badge }}</td>
-          <td>{{ r.tickers }}</td>
+          <td style="font-size:12px;">{{ r.tickers or "—" }}</td>
+          <td style="font-size:12px;color:var(--fg-muted);max-width:280px;word-break:break-word;">{{ r.instruction or "—" }}</td>
           <td style="font-size:11px;color:var(--fg-muted);">{{ r.last_line[:80] }}</td>
-          <td>
+          <td style="white-space:nowrap;">
             <a href="/runs/{{ r.run_id }}" class="btn small secondary">日志</a>
             {% if r.has_result %}<a href="/runs/{{ r.run_id }}/result" class="btn small">结果</a>{% endif %}
+            {% if r.can_cancel %}
+              <form method="post" action="/runs/{{ r.run_id }}/cancel" style="display:inline;"
+                    onsubmit="return confirm('确认取消 run {{ r.run_id }}？将 SIGTERM/KILL 整个进程组。')">
+                <button type="submit" class="small danger">取消</button>
+              </form>
+            {% endif %}
+            {% if r.can_retry %}
+              <form method="post" action="/runs/{{ r.run_id }}/retry" style="display:inline;"
+                    onsubmit="return confirm('重试 run {{ r.run_id }}（{{ r.tickers }}）？将启动一个新的 run。')">
+                <button type="submit" class="small">↻ 重试</button>
+              </form>
+            {% endif %}
           </td>
         </tr>
         {% endfor %}

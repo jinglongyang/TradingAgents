@@ -19,7 +19,7 @@
     最新 snapshot: <strong>{{ latest }}</strong> · {{ n_rows }} 仓位 · 总价值 <strong>${{ "{:,.0f}".format(total_val) }}</strong> · 今天: {{ today }}
   </div>
 
-  {{ message|safe }}
+  {% if flash %}<div class="msg {{ flash.level }}">{{ flash.text|safe }}</div>{% endif %}
 
   <div class="toolbar">
     <button onclick="openModal('add-modal')">➕ 添加新持仓</button>

@@ -300,17 +300,19 @@ def _ticker_pool() -> list[dict[str, str]]:
     return out
 
 
-def _render(message: str = ""):
-    """Render the main holdings page via Jinja2."""
+def _render(message: str = "", level: str = "success"):
+    """Render the main holdings page via Jinja2.
+
+    `message` is plain text (may contain inline HTML if needed, gets ``|safe``
+    in the template); `level` is one of success / error / info / warning.
+    Empty `message` means no flash banner.
+    """
     import json as _json
-    from starlette.requests import Request as _Req
     html_view, n_rows, total_val = _build_holdings_view()
     ticker_pool = _ticker_pool()
-    # Build a minimal stub Request — TemplateResponse needs one even when we
-    # don't actually use url_for / request data.
-    dummy_req = _Req(scope={"type": "http", "headers": [], "method": "GET", "path": "/"})
+    flash = {"text": message, "level": level} if message else None
     return templates.TemplateResponse(
-        dummy_req,
+        _dummy_request(),
         "index.html",
         {
             "css": CSS,
@@ -322,7 +324,7 @@ def _render(message: str = ""):
             "today": date.today().isoformat(),
             "ticker_pool": ticker_pool,
             "ticker_json": _json.dumps(ticker_pool, ensure_ascii=False),
-            "message": message or "",
+            "flash": flash,
         },
     )
 
@@ -332,8 +334,7 @@ def _render(message: str = ""):
 @app.get("/", response_class=HTMLResponse)
 def index(msg: str = ""):
     init_db()
-    flash = f'<div class="msg success">{msg}</div>' if msg else ""
-    return _render(message=flash)
+    return _render(message=msg or "")
 
 
 @app.post("/add")
@@ -393,10 +394,8 @@ def add(
         # from a recycled modal — JS reuses one form element across accounts).
         anchor = "acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", account_id.strip())
         return RedirectResponse(url=f"/#{anchor}", status_code=303)
-        msg = f'<div class="msg success">✓ 已添加 <strong>{symbol.upper()}</strong> 到 {account_name}</div>'
     except Exception as e:  # noqa: BLE001
-        msg = f'<div class="msg error">✗ 错误: {e}</div>'
-    return _render(message=msg)
+        return _render(message=f"✗ 错误: {e}", level="error")
 
 
 @app.post("/delete-row")
@@ -409,7 +408,7 @@ def delete_row(snapshot_id: int = Form(...)):
             (snapshot_id,),
         ).fetchone()
         if not row:
-            return _render(message='<div class="msg error">行不存在</div>')
+            return _render(message="行不存在", level="error")
         conn.execute("DELETE FROM positions_snapshot WHERE snapshot_id = ?", (snapshot_id,))
         anchor = "acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", row["account_id"])
     return RedirectResponse(url=f"/#{anchor}", status_code=303)
@@ -563,10 +562,12 @@ def account_delete(account_id: str = Form(...)):
                 (account_id,),
             )
             n = cur.rowcount
-        msg = f'<div class="msg success">✓ 已删除账户 <code>{account_id[:24]}</code> 的 <strong>{n}</strong> 行持仓（executions 保留）</div>'
+        return _render(
+            message=f"✓ 已删除账户 <code>{account_id[:24]}</code> 的 <strong>{n}</strong> 行持仓（executions 保留）",
+            level="success",
+        )
     except Exception as e:  # noqa: BLE001
-        msg = f'<div class="msg error">✗ 错误: {e}</div>'
-    return _render(message=msg)
+        return _render(message=f"✗ 错误: {e}", level="error")
 
 
 @app.post("/account-edit")
@@ -593,7 +594,7 @@ def account_edit(
         anchor = "acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", account_id)
         return RedirectResponse(url=f"/#{anchor}", status_code=303)
     except Exception as e:  # noqa: BLE001
-        return _render(message=f'<div class="msg error">✗ 错误: {e}</div>')
+        return _render(message=f"✗ 错误: {e}", level="error")
 
 
 @app.post("/edit")
@@ -653,7 +654,7 @@ def edit(
         anchor = ("acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", row["account_id"])) if row else ""
         return RedirectResponse(url=f"/#{anchor}" if anchor else "/", status_code=303)
     except Exception as e:  # noqa: BLE001
-        return _render(message=f'<div class="msg error">✗ 错误: {e}</div>')
+        return _render(message=f"✗ 错误: {e}", level="error")
 
 
 @app.post("/sell")
@@ -704,7 +705,7 @@ def sell(
         anchor = "acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", account_id)
         return RedirectResponse(url=f"/#{anchor}", status_code=303)
     except Exception as e:  # noqa: BLE001
-        return _render(message=f'<div class="msg error">✗ 错误: {e}</div>')
+        return _render(message=f"✗ 错误: {e}", level="error")
 
 
 @app.get("/lookup", response_class=HTMLResponse)
@@ -2134,27 +2135,31 @@ def run_analysis(
 
     if mode == "sector":
         if not sector.strip():
-            return _render(message='<div class="msg error">没有提供行业描述</div>')
+            return _render(message='没有提供行业描述', level='error')
         cmd_chain = [
             f"uv run python scripts/analyze_sector.py --sector '{sector.strip()}'",
             "uv run python scripts/migrate_decisions_to_db.py",
         ]
         with open(status_path, "w") as f:
-            f.write(f"queued\nmode=sector\nsector={sector}\ninstruction={instruction[:200]}\n")
+            f.write("queued\n")
+        with open(f"/tmp/pm_run_{run_id}.meta", "w") as f:
+            f.write(f"mode=sector\nsector={sector}\ninstruction={instruction[:500]}\n")
         full_cmd = (
             f"echo running > {status_path} && "
             + " && ".join(cmd_chain)
             + f" && echo done > {status_path} || echo failed > {status_path}"
         )
-        _sp.Popen(["sh", "-c", full_cmd], env=env, cwd=str(project_root),
+        proc = _sp.Popen(["sh", "-c", full_cmd], env=env, cwd=str(project_root),
                   stdout=open(log_path, "w"), stderr=_sp.STDOUT, start_new_session=True)
+        with open(f"/tmp/pm_run_{run_id}.pid", "w") as f:
+            f.write(str(proc.pid))
         msg = (
-            f'<div class="msg success">🏭 已启动行业分析 <code>{run_id}</code>: <strong>{sector}</strong>'
+            f'🏭 已启动行业分析 <code>{run_id}</code>: <strong>{sector}</strong>'
             f'{" · 已注入自定义指令" if instruction.strip() else ""}<br>'
             f'LLM 先列 ticker 再逐个跑（5-10 个 × 2 分钟 ≈ 15 分钟）· '
-            f'<a href="/runs">查看进度</a></div>'
+            f'<a href="/runs">查看进度</a>'
         )
-        return _render(message=msg)
+        return _render(message=msg, level="success")
 
     if mode == "all":
         # Use all currently-held tickers
@@ -2169,12 +2174,12 @@ def run_analysis(
         else:
             ticker_list = []
         if not ticker_list:
-            return _render(message='<div class="msg error">没有持仓数据可分析</div>')
+            return _render(message='没有持仓数据可分析', level='error')
     else:
         # Accept any of: comma / space / tab / Chinese comma / Chinese dunhao / semicolon
         ticker_list = [t.upper() for t in re.split(r"[\s,，、;]+", tickers.strip()) if t]
         if not ticker_list:
-            return _render(message='<div class="msg error">没有提供 ticker</div>')
+            return _render(message='没有提供 ticker', level='error')
 
     # Classify each ticker: held vs new
     latest = latest_snapshot_date()
@@ -2200,9 +2205,19 @@ def run_analysis(
     if instruction.strip():
         env["USER_TAX_CONTEXT"] = instruction.strip()
 
-    # Write status: queued
+    # Status file holds just the state word (queued/running/done/failed);
+    # the shell command rewrites it as the run progresses. Metadata that
+    # must survive those rewrites goes to .meta.
     with open(status_path, "w") as f:
-        f.write(f"queued\ntickers={','.join(ticker_list)}\nheld={','.join(held_tickers)}\nnew={','.join(new_tickers)}\ninstruction={instruction[:200]}\n")
+        f.write("queued\n")
+    meta_path = f"/tmp/pm_run_{run_id}.meta"
+    with open(meta_path, "w") as f:
+        f.write(
+            f"tickers={','.join(ticker_list)}\n"
+            f"held={','.join(held_tickers)}\n"
+            f"new={','.join(new_tickers)}\n"
+            f"instruction={instruction[:500]}\n"
+        )
 
     cmds = []
     if held_tickers:
@@ -2216,7 +2231,7 @@ def run_analysis(
         + f" && echo done > {status_path} || echo failed > {status_path}"
     )
 
-    _sp.Popen(
+    proc = _sp.Popen(
         ["sh", "-c", full_cmd],
         env=env,
         cwd=str(project_root),
@@ -2224,6 +2239,11 @@ def run_analysis(
         stderr=_sp.STDOUT,
         start_new_session=True,
     )
+    # Persist PID for cancel + liveness checks. start_new_session=True means
+    # this PID is also the process group leader — killpg(pid, SIGTERM) kills
+    # the entire chain (sh -> uv -> python).
+    with open(f"/tmp/pm_run_{run_id}.pid", "w") as f:
+        f.write(str(proc.pid))
 
     desc = []
     if held_tickers:
@@ -2232,10 +2252,10 @@ def run_analysis(
         desc.append(f"{len(new_tickers)} 只新股: {', '.join(new_tickers)}")
     instr_note = " · 已注入自定义指令" if instruction.strip() else ""
     msg = (
-        f'<div class="msg success">🚀 已启动 run <code>{run_id}</code>: {" + ".join(desc)}{instr_note}<br>'
-        f'<a href="/runs">查看进度</a> · 跑完后去 <a href="/decisions">PM 评级</a> 看结果</div>'
+        f'🚀 已启动 run <code>{run_id}</code>: {" + ".join(desc)}{instr_note}<br>'
+        f'<a href="/runs">查看进度</a> · 跑完后去 <a href="/decisions">PM 评级</a> 看结果'
     )
-    return _render(message=msg)
+    return _render(message=msg, level="success")
 
 
 def _find_output_dir_for_run(log_path: str) -> Path | None:
@@ -2259,7 +2279,62 @@ _STATUS_BADGE = {
     "done": "✅ 完成",
     "failed": "❌ 失败",
     "queued": "⏳ 排队",
+    "cancelled": "🛑 已取消",
+    "stalled": "⏱️ 超时无活动",
+    "orphan": "💀 进程已退出",
 }
+
+# A run is considered stalled if its log file has not been touched
+# for this many seconds — typical analyze_holdings writes log lines
+# every 2-3s during LLM calls, so 5 minutes is generous.
+_STALLED_SECONDS = 300
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        import os as _os
+        _os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+
+
+def _classify_run(log_path: str, status_path: str, pid_path: str) -> tuple[str, int | None]:
+    """Refine the raw status with liveness + stall detection.
+
+    Returns (effective_status, pid_or_None). Effective statuses:
+    queued / running / done / failed / cancelled / stalled / orphan.
+    """
+    import os as _os
+    raw = "unknown"
+    if Path(status_path).exists():
+        content = Path(status_path).read_text()
+        raw = content.splitlines()[0].strip() if content else "unknown"
+
+    pid: int | None = None
+    if Path(pid_path).exists():
+        try:
+            pid = int(Path(pid_path).read_text().strip())
+        except ValueError:
+            pid = None
+
+    if raw not in ("running", "queued"):
+        return raw, pid
+
+    # raw says "running" — verify
+    if pid is not None and not _pid_alive(pid):
+        return "orphan", pid
+
+    # PID alive (or unknown) — check log mtime for stall
+    try:
+        age = _os.path.getmtime(log_path)
+        import time as _t
+        if _t.time() - age > _STALLED_SECONDS:
+            return "stalled", pid
+    except OSError:
+        pass
+
+    return raw, pid
 
 
 def _dummy_request():
@@ -2276,14 +2351,20 @@ def runs_view():
     for log in logs:
         run_id = log.replace("/tmp/pm_run_", "").replace(".log", "")
         status_path = log.replace(".log", ".status")
-        status = "unknown"
-        tickers = ""
-        if Path(status_path).exists():
-            content = Path(status_path).read_text()
-            status = content.splitlines()[0] if content else "?"
-            for line in content.splitlines():
-                if line.startswith("tickers="):
-                    tickers = line.split("=", 1)[1]
+        pid_path = log.replace(".log", ".pid")
+        meta_path = log.replace(".log", ".meta")
+        effective, pid = _classify_run(log, status_path, pid_path)
+        meta: dict[str, str] = {}
+        # Prefer .meta; fall back to status for legacy runs that stored
+        # tickers/instruction there.
+        for p in (meta_path, status_path):
+            if Path(p).exists():
+                for line in Path(p).read_text().splitlines():
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        meta.setdefault(k, v)
+        tickers = meta.get("tickers", "") or meta.get("sector", "")
+        instruction = meta.get("instruction", "")
         last_line = ""
         try:
             with open(log) as f:
@@ -2293,16 +2374,72 @@ def runs_view():
             pass
         runs.append({
             "run_id": run_id,
-            "badge": _STATUS_BADGE.get(status, status),
+            "status": effective,
+            "badge": _STATUS_BADGE.get(effective, effective),
             "tickers": tickers,
+            "instruction": instruction,
             "last_line": last_line,
             "has_result": _find_output_dir_for_run(log) is not None,
+            "can_cancel": effective in ("running", "queued", "stalled"),
+            "can_retry": effective in ("failed", "cancelled", "stalled", "orphan") and bool(tickers),
         })
     return templates.TemplateResponse(
         _dummy_request(),
         "runs_list.html",
         {"css": CSS, "runs": runs},
     )
+
+
+@app.post("/runs/{run_id}/cancel")
+def run_cancel(run_id: str):
+    """Send SIGTERM to the entire process group of a still-running job."""
+    import os as _os
+    import signal as _sig
+    pid_path = f"/tmp/pm_run_{run_id}.pid"
+    status_path = f"/tmp/pm_run_{run_id}.status"
+    if not Path(pid_path).exists():
+        return RedirectResponse(url="/runs?msg=PID+file+missing", status_code=303)
+    try:
+        pid = int(Path(pid_path).read_text().strip())
+    except ValueError:
+        return RedirectResponse(url="/runs?msg=Invalid+PID", status_code=303)
+    try:
+        # start_new_session=True made pid the PG leader — kill the whole tree
+        _os.killpg(pid, _sig.SIGTERM)
+    except ProcessLookupError:
+        pass
+    # Wait briefly, then SIGKILL anything that survived
+    import time as _t
+    _t.sleep(0.5)
+    try:
+        _os.killpg(pid, _sig.SIGKILL)
+    except ProcessLookupError:
+        pass
+    with open(status_path, "w") as f:
+        f.write("cancelled\n")
+    return RedirectResponse(url="/runs", status_code=303)
+
+
+@app.post("/runs/{run_id}/retry")
+def run_retry(run_id: str):
+    """Re-spawn with the same tickers + instruction as the original run."""
+    meta_path = f"/tmp/pm_run_{run_id}.meta"
+    legacy_status_path = f"/tmp/pm_run_{run_id}.status"
+    meta: dict[str, str] = {}
+    for p in (meta_path, legacy_status_path):
+        if Path(p).exists():
+            for line in Path(p).read_text().splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    meta.setdefault(k, v)
+    tickers = meta.get("tickers", "")
+    instruction = meta.get("instruction", "")
+    sector = meta.get("sector", "")
+    if tickers:
+        return run_analysis(mode="tickers", tickers=tickers, sector="", instruction=instruction)
+    if sector:
+        return run_analysis(mode="sector", tickers="", sector=sector, instruction=instruction)
+    return RedirectResponse(url="/runs?msg=No+tickers+to+retry", status_code=303)
 
 
 @app.get("/runs/{run_id}", response_class=HTMLResponse)
