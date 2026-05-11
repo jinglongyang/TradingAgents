@@ -265,6 +265,9 @@ def main() -> int:
     parser.add_argument("--max-tickers", type=int, default=10)
     parser.add_argument("--trade-date", default="2026-05-08")
     parser.add_argument("--out-dir", type=Path, default=Path("outputs"))
+    parser.add_argument("--parallel", type=int, default=3,
+                        help="How many ticker analyses to run concurrently. Default 3 — "
+                             "each spawns its own analyze_new_ticker subprocess.")
     args = parser.parse_args()
 
     log.info("Sector: %s", args.sector)
@@ -273,12 +276,31 @@ def main() -> int:
         print("No valid tickers found.", file=sys.stderr)
         return 1
 
-    for t in tickers:
-        try:
-            run_per_ticker(t, args.trade_date)
-        except Exception as e:
-            log.exception("Crash on %s: %s", t, e)
-        time.sleep(2)  # be polite
+    parallel = max(1, int(args.parallel))
+    log.info("Concurrency: %d (use --parallel N to change)", parallel)
+
+    if parallel == 1:
+        for t in tickers:
+            try:
+                run_per_ticker(t, args.trade_date)
+            except Exception as e:
+                log.exception("Crash on %s: %s", t, e)
+            time.sleep(2)
+    else:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _worker(t):
+            try:
+                return t, run_per_ticker(t, args.trade_date)
+            except Exception as e:
+                log.exception("Crash on %s: %s", t, e)
+                return t, False
+
+        with ThreadPoolExecutor(max_workers=parallel) as ex:
+            futures = [ex.submit(_worker, t) for t in tickers]
+            for fut in as_completed(futures):
+                t, ok = fut.result()
+                log.info("[done] %s %s", t, "OK" if ok else "FAILED")
 
     collect_summary(tickers, args.sector, args.out_dir)
     return 0

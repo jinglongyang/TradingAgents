@@ -282,6 +282,9 @@ def main() -> int:
     parser.add_argument("--quick-model", default=None,
                         help="Override DEFAULT_CONFIG['quick_think_llm'] (which reads QUICK_THINK_LLM env).")
     parser.add_argument("--out-dir", type=Path, default=Path("outputs"))
+    parser.add_argument("--parallel", type=int, default=3,
+                        help="How many tickers to analyze concurrently. Default 3 — "
+                             "balances Azure rate limits against wall time. Use 1 for serial.")
     args = parser.parse_args()
 
     if not args.ticker and not args.all and not args.tickers:
@@ -312,18 +315,44 @@ def main() -> int:
     per_ticker_dir = out_dir / "per_ticker"
 
     config = build_config(args.deep_model, args.quick_model)
-    ta = TradingAgentsGraph(debug=False, config=config)
 
     results: list[tuple[str, Holding, dict[str, Any]]] = []
-    for i, ticker in enumerate(tickers, 1):
+    parallel = max(1, int(args.parallel))
+    log.info("Concurrency: %d (use --parallel N to change)", parallel)
+
+    def _analyze_one(idx_ticker):
+        i, ticker = idx_ticker
         log.info("[%d/%d] Starting %s", i, len(tickers), ticker)
+        # Each worker constructs its own TradingAgentsGraph because the graph
+        # carries mutable per-run state (self.curr_state, self.ticker).
+        # Construction is fast (~1s) and LLM clients underneath are thread-safe.
+        ta = TradingAgentsGraph(debug=False, config=config)
         try:
-            state = run_one(ta, ticker, args.trade_date, holdings, portfolio_total)
+            return ticker, run_one(ta, ticker, args.trade_date, holdings, portfolio_total)
         except Exception as exc:
             log.exception("Failed on %s: %s", ticker, exc)
-            continue
-        results.append((ticker, holdings[ticker], state))
-        write_per_ticker_json(per_ticker_dir, ticker, state)
+            return ticker, None
+
+    indexed = list(enumerate(tickers, 1))
+    if parallel == 1:
+        for it in indexed:
+            ticker, state = _analyze_one(it)
+            if state is None:
+                continue
+            results.append((ticker, holdings[ticker], state))
+            write_per_ticker_json(per_ticker_dir, ticker, state)
+    else:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=parallel) as ex:
+            futures = [ex.submit(_analyze_one, it) for it in indexed]
+            for fut in as_completed(futures):
+                ticker, state = fut.result()
+                if state is None:
+                    continue
+                results.append((ticker, holdings[ticker], state))
+                # Persist per-ticker JSON immediately so partial progress survives
+                # a crash or kill.
+                write_per_ticker_json(per_ticker_dir, ticker, state)
 
     if results:
         write_report(out_dir, args.trade_date, portfolio_total, results)
