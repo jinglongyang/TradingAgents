@@ -46,6 +46,7 @@ class Position:
     current_value: float
     cost_basis_total: float
     avg_cost: float
+    broker: str = "Unknown"
 
 
 @dataclass(frozen=True)
@@ -157,6 +158,7 @@ def parse_fidelity_csv(path: str | Path) -> list[Position]:
                     current_value=_parse_money(row.get("Current Value")),
                     cost_basis_total=_parse_money(row.get("Cost Basis Total")),
                     avg_cost=_parse_money(row.get("Average Cost Basis")),
+                    broker="Fidelity",
                 )
             )
     return positions

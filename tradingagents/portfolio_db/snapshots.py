@@ -72,6 +72,7 @@ def parse_manual_csv(path: Path) -> list[Position]:
                 current_value=current_value,
                 cost_basis_total=cost_basis_total,
                 avg_cost=avg_cost,
+                broker=(row.get("broker") or "Manual").strip(),
             ))
     return out
 
@@ -110,21 +111,23 @@ def _write_positions(
                 """
                 INSERT INTO positions_snapshot (
                     import_date, statement_date, account_id, account_name, account_type,
-                    symbol, quantity, last_price, current_value, cost_basis_total, avg_cost
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    symbol, quantity, last_price, current_value, cost_basis_total, avg_cost,
+                    broker
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(import_date, account_id, symbol) DO UPDATE SET
                     quantity         = excluded.quantity,
                     last_price       = excluded.last_price,
                     current_value    = excluded.current_value,
                     cost_basis_total = excluded.cost_basis_total,
                     avg_cost         = excluded.avg_cost,
-                    statement_date   = excluded.statement_date
+                    statement_date   = excluded.statement_date,
+                    broker           = excluded.broker
                 """,
                 (
                     import_date, statement_date,
                     pos.account_id, pos.account_name, pos.account_type.value,
                     pos.symbol, pos.quantity, pos.last_price, pos.current_value,
-                    pos.cost_basis_total, pos.avg_cost,
+                    pos.cost_basis_total, pos.avg_cost, pos.broker,
                 ),
             )
             if cur.rowcount == 1:
@@ -144,6 +147,7 @@ def add_position(
     cost_basis_total: float = 0.0,
     import_date: str | None = None,
     db_path: Path | None = None,
+    broker: str = "Manual",
 ) -> int:
     """Insert (or replace) a single manually-entered position. Returns rowid."""
     import_date = import_date or date.today().isoformat()
@@ -162,6 +166,7 @@ def add_position(
         account_id=account_id, account_name=account_name, account_type=atype,
         symbol=symbol.upper(), quantity=quantity, last_price=last_price,
         current_value=current_value, cost_basis_total=cost_basis_total, avg_cost=avg_cost,
+        broker=broker,
     )
     result = _write_positions([pos], import_date, import_date, 0, db_path)
     return result["inserted"] + result["updated"]

@@ -103,8 +103,14 @@ def connect(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
 
 
 def init_db(db_path: Path | None = None) -> Path:
-    """Create tables if missing. Idempotent."""
+    """Create tables if missing. Idempotent — also runs lightweight migrations."""
     path = Path(db_path) if db_path else DEFAULT_DB_PATH
     with connect(path) as conn:
         conn.executescript(SCHEMA)
+        # Migration: add broker column to positions_snapshot if missing
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(positions_snapshot)").fetchall()}
+        if "broker" not in cols:
+            conn.execute("ALTER TABLE positions_snapshot ADD COLUMN broker TEXT")
+            # Backfill: existing Fidelity-imported rows
+            conn.execute("UPDATE positions_snapshot SET broker = 'Fidelity' WHERE broker IS NULL")
     return path

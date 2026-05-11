@@ -110,12 +110,13 @@ function openSell(sym, acctId, acctName, qty) {
     document.getElementById('sell-title').textContent = `Sell ${sym} from ${acctName}`;
     openModal('sell-modal');
 }
-function openEdit(snapshotId, sym, qty, price, cost) {
+function openEdit(snapshotId, sym, qty, price, cost, broker) {
     document.getElementById('edit-snapshot-id').value = snapshotId;
     document.getElementById('edit-symbol').value = sym;
     document.getElementById('edit-qty').value = qty;
     document.getElementById('edit-price').value = price;
     document.getElementById('edit-cost').value = cost;
+    document.getElementById('edit-broker').value = broker || 'Fidelity';
     document.getElementById('edit-title').textContent = `Edit ${sym}`;
     openModal('edit-modal');
 }
@@ -150,12 +151,14 @@ def _build_holdings_view():
         sub = sum(r["current_value"] for r in items)
         total += sub
         atype = items[0]["account_type"]
+        broker = items[0]["broker"] or "—"
         out.append(f'''
 <div class="account">
   <div class="account-header">
     <div>
       <span class="account-name">{aname}</span>
       <span class="tag tag-{atype.lower()}">{atype}</span>
+      <span class="tag" style="margin-left:4px;font-size:10px;background:var(--bg);border:1px solid var(--border);">🏦 {broker}</span>
     </div>
     <div class="account-meta">{len(items)} 仓位 · ${sub:,.0f}</div>
   </div>
@@ -175,7 +178,7 @@ def _build_holdings_view():
         <td class="num">${cost:,.0f}</td>
         <td class="num {pl_class}">{pl_pct:+.1f}%</td>
         <td class="actions">
-          <button class="small secondary" onclick="openEdit({r['snapshot_id']}, '{r['symbol']}', {r['quantity']}, {r['last_price']}, {cost})">Edit</button>
+          <button class="small secondary" onclick="openEdit({r['snapshot_id']}, '{r['symbol']}', {r['quantity']}, {r['last_price']}, {cost}, '{r['broker'] or 'Fidelity'}')">Edit</button>
           <button class="small danger" onclick="openSell('{r['symbol']}', '{aid}', '{aname}', {r['quantity']})">Sell</button>
         </td>
       </tr>''')
@@ -208,6 +211,8 @@ def _render(message: str = ""):
 
   <div class="toolbar">
     <button onclick="openModal('add-modal')">➕ 添加新持仓</button>
+    <a class="btn secondary" href="/decisions">📋 PM 分析 & 评级</a>
+    <a class="btn secondary" href="/executions">📒 交易记录</a>
     <a class="btn secondary" href="/api/positions" target="_blank">View JSON</a>
   </div>
 
@@ -223,14 +228,30 @@ def _render(message: str = ""):
         <div class="field"><label>账户 ID <span class="hint">如 RH-IND</span></label><input name="account_id" required></div>
         <div class="field"><label>账户名</label><input name="account_name" required></div>
       </div>
-      <div class="field">
-        <label>账户类型</label>
-        <select name="account_type">
-          <option value="Taxable" selected>Taxable — 应税</option>
-          <option value="Roth">Roth</option>
-          <option value="TaxDeferred">TaxDeferred — 401k/IRA</option>
-          <option value="ChildEdu">ChildEdu — 529</option>
-        </select>
+      <div class="row">
+        <div class="field">
+          <label>账户类型</label>
+          <select name="account_type">
+            <option value="Taxable" selected>Taxable — 应税</option>
+            <option value="Roth">Roth</option>
+            <option value="TaxDeferred">TaxDeferred — 401k/IRA</option>
+            <option value="ChildEdu">ChildEdu — 529</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Broker / 平台</label>
+          <select name="broker">
+            <option value="Fidelity">Fidelity</option>
+            <option value="Robinhood" selected>Robinhood</option>
+            <option value="Schwab">Schwab</option>
+            <option value="E-Trade">E-Trade</option>
+            <option value="Vanguard">Vanguard</option>
+            <option value="Interactive Brokers">Interactive Brokers</option>
+            <option value="Merrill Lynch">Merrill Lynch</option>
+            <option value="TD Ameritrade">TD Ameritrade</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
       </div>
       <div class="row">
         <div class="field"><label>Ticker</label><input name="symbol" required style="text-transform: uppercase"></div>
@@ -282,6 +303,20 @@ def _render(message: str = ""):
         <div class="field"><label>当前价</label><input id="edit-price" name="last_price" type="number" step="0.01"></div>
       </div>
       <div class="field"><label>总成本</label><input id="edit-cost" name="cost_basis_total" type="number" step="0.01"></div>
+      <div class="field">
+        <label>Broker / 平台</label>
+        <select id="edit-broker" name="broker">
+          <option value="Fidelity">Fidelity</option>
+          <option value="Robinhood">Robinhood</option>
+          <option value="Schwab">Schwab</option>
+          <option value="E-Trade">E-Trade</option>
+          <option value="Vanguard">Vanguard</option>
+          <option value="Interactive Brokers">Interactive Brokers</option>
+          <option value="Merrill Lynch">Merrill Lynch</option>
+          <option value="TD Ameritrade">TD Ameritrade</option>
+          <option value="Other">Other</option>
+        </select>
+      </div>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
         <button type="button" class="secondary" onclick="closeModal('edit-modal')">取消</button>
         <button type="submit">保存</button>
@@ -305,6 +340,7 @@ def add(
     account_id: str = Form(...),
     account_name: str = Form(...),
     account_type: str = Form("Taxable"),
+    broker: str = Form("Robinhood"),
     symbol: str = Form(...),
     quantity: float = Form(...),
     last_price: Optional[float] = Form(None),
@@ -316,6 +352,7 @@ def add(
             account_type=account_type, symbol=symbol.strip().upper(),
             quantity=quantity, last_price=last_price or 0.0,
             cost_basis_total=cost_basis_total or 0.0,
+            broker=broker,
         )
         msg = f'<div class="msg success">✓ 已添加 <strong>{symbol.upper()}</strong> 到 {account_name}</div>'
     except Exception as e:  # noqa: BLE001
@@ -329,6 +366,7 @@ def edit(
     quantity: float = Form(...),
     last_price: Optional[float] = Form(None),
     cost_basis_total: Optional[float] = Form(None),
+    broker: Optional[str] = Form(None),
 ):
     try:
         price = last_price or 0.0
@@ -339,11 +377,11 @@ def edit(
                 UPDATE positions_snapshot
                 SET quantity = ?, last_price = ?,
                     current_value = ?, cost_basis_total = ?,
-                    avg_cost = ?
+                    avg_cost = ?, broker = COALESCE(?, broker)
                 WHERE snapshot_id = ?
                 """,
                 (quantity, price, price * quantity if price else cost,
-                 cost, cost / quantity if quantity else 0.0, snapshot_id),
+                 cost, cost / quantity if quantity else 0.0, broker, snapshot_id),
             )
             row = conn.execute("SELECT symbol FROM positions_snapshot WHERE snapshot_id = ?", (snapshot_id,)).fetchone()
         sym = row["symbol"] if row else "?"
@@ -402,6 +440,133 @@ def sell(
     except Exception as e:  # noqa: BLE001
         msg = f'<div class="msg error">✗ 错误: {e}</div>'
     return _render(message=msg)
+
+
+@app.get("/decisions", response_class=HTMLResponse)
+def decisions_view():
+    import json as _json
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM decisions ORDER BY rating, symbol"
+        ).fetchall()
+
+    RATING_ORDER = {"Buy": 0, "Overweight": 1, "Hold": 2, "Underweight": 3, "Sell": 4}
+    rows_sorted = sorted(rows, key=lambda r: (RATING_ORDER.get(r["rating"], 99), r["symbol"]))
+
+    counts = {}
+    for r in rows:
+        counts[r["rating"]] = counts.get(r["rating"], 0) + 1
+    chips = " ".join(
+        f'<span class="tag tag-{r.lower()}" style="padding:4px 10px;font-size:12px;margin-right:6px">{r}: {counts.get(r,0)}</span>'
+        for r in ["Buy", "Overweight", "Hold", "Underweight", "Sell"] if counts.get(r, 0)
+    )
+
+    body = [f'<h1>📋 PM 分析 & 评级</h1><p class="subtitle">{len(rows)} 个 ticker · 最新分析按 ticker 自动汇总</p>',
+            f'<div class="status">{chips}</div>',
+            '<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 回到持仓</a></div>',
+            '<table style="background:var(--bg-subtle);border-radius:8px;border:1px solid var(--border);overflow:hidden;">',
+            '<thead><tr><th>Ticker</th><th>评级</th><th>分析日期</th><th class="num">账户级动作</th><th>反思（如有）</th><th></th></tr></thead>',
+            '<tbody>']
+    for r in rows_sorted:
+        actions = _json.loads(r["account_actions"]) if r["account_actions"] else []
+        n_act = sum(1 for a in actions if a.get("action") not in (None, "Hold"))
+        reflection = (r["reflection"] or "")[:80]
+        body.append(
+            f'<tr>'
+            f'<td><strong>{r["symbol"]}</strong></td>'
+            f'<td><span class="tag tag-{r["rating"].lower()}" style="padding:3px 10px;">{r["rating"]}</span></td>'
+            f'<td>{r["trade_date"]}</td>'
+            f'<td class="num">{n_act} actions ({len(actions)} accts)</td>'
+            f'<td style="color:var(--fg-muted);font-size:12px;">{reflection}</td>'
+            f'<td><a href="/decisions/{r["symbol"]}" class="btn small secondary">详情</a></td>'
+            f'</tr>'
+        )
+    body.append('</tbody></table>')
+
+    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PM 分析 — Portfolio Manager</title><style>{CSS}
+.tag-buy {{ background: color-mix(in srgb, var(--success) 30%, transparent); color: var(--success); }}
+.tag-overweight {{ background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); }}
+.tag-hold {{ background: var(--border); color: var(--fg-muted); }}
+.tag-underweight {{ background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }}
+.tag-sell {{ background: color-mix(in srgb, var(--danger) 30%, transparent); color: var(--danger); }}
+</style></head><body><div class="container">
+{''.join(body)}
+</div></body></html>"""
+
+
+@app.get("/decisions/{ticker}", response_class=HTMLResponse)
+def decision_detail(ticker: str):
+    import json as _json
+    import markdown as _md
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM decisions WHERE symbol = ? ORDER BY trade_date DESC LIMIT 1",
+            (ticker.upper(),),
+        ).fetchone()
+    if not row:
+        return HTMLResponse(f"<p>No decision for {ticker}</p><a href='/decisions'>← Back</a>")
+
+    decision_html = _md.markdown(row["final_decision"], extensions=["tables", "fenced_code"])
+
+    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{ticker} — PM 分析</title><style>{CSS}
+table {{ background: var(--bg-subtle); border-radius: 6px; }}
+.markdown {{ background: var(--bg-subtle); padding: 24px; border-radius: 8px; border: 1px solid var(--border); }}
+.markdown h2 {{ color: var(--fg); margin-top: 24px; font-size: 18px; }}
+.markdown strong {{ color: var(--fg); }}
+.markdown table {{ width: 100%; margin: 16px 0; }}
+.tag-buy {{ background: color-mix(in srgb, var(--success) 30%, transparent); color: var(--success); }}
+.tag-overweight {{ background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); }}
+.tag-hold {{ background: var(--border); color: var(--fg-muted); }}
+.tag-underweight {{ background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }}
+.tag-sell {{ background: color-mix(in srgb, var(--danger) 30%, transparent); color: var(--danger); }}
+</style></head><body><div class="container">
+<h1>{ticker} <span class="tag tag-{row['rating'].lower()}" style="padding:4px 12px;font-size:14px;margin-left:8px;">{row['rating']}</span></h1>
+<p class="subtitle">分析日期: {row['trade_date']} · 录入时间: {row['created_at']}</p>
+<div style="margin-bottom:24px;"><a class="btn secondary" href="/decisions">← 回到所有评级</a> <a class="btn secondary" href="/">← 持仓页</a></div>
+<div class="markdown">{decision_html}</div>
+</div></body></html>"""
+
+
+@app.get("/executions", response_class=HTMLResponse)
+def executions_view():
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM executions ORDER BY trade_date DESC, execution_id DESC LIMIT 100"
+        ).fetchall()
+
+    body = ['<h1>📒 交易记录</h1>',
+            f'<p class="subtitle">{len(rows)} 笔最近交易</p>',
+            '<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a> <a class="btn secondary" href="/decisions">PM 分析</a></div>']
+
+    if not rows:
+        body.append('<p style="color:var(--fg-muted);">还没记录任何交易 — 用持仓页的 Sell 按钮记录</p>')
+    else:
+        body.append('<table style="background:var(--bg-subtle);border-radius:8px;border:1px solid var(--border);">')
+        body.append('<thead><tr><th>日期</th><th>Ticker</th><th>动作</th><th class="num">股数</th><th class="num">价格</th><th class="num">总额</th><th>账户</th><th>备注</th></tr></thead><tbody>')
+        for r in rows:
+            total = r["shares"] * r["price"]
+            sign = "-" if r["action"] == "SELL" else "+"
+            cls = "loss" if r["action"] == "SELL" else "gain"
+            body.append(
+                f'<tr>'
+                f'<td>{r["trade_date"]}</td>'
+                f'<td><strong>{r["symbol"]}</strong></td>'
+                f'<td><span class="tag" style="background:var(--{"danger" if r["action"]=="SELL" else "success"});color:white;padding:2px 8px;">{r["action"]}</span></td>'
+                f'<td class="num">{r["shares"]:.3f}</td>'
+                f'<td class="num">${r["price"]:.2f}</td>'
+                f'<td class="num {cls}">{sign}${total:,.0f}</td>'
+                f'<td>{r["account_name"]}</td>'
+                f'<td style="font-size:12px;color:var(--fg-muted);">{r["note"] or ""}</td>'
+                f'</tr>'
+            )
+        body.append('</tbody></table>')
+
+    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>交易记录</title><style>{CSS}</style></head><body><div class="container">
+{''.join(body)}
+</div></body></html>"""
 
 
 @app.get("/api/positions")
