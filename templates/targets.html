@@ -20,10 +20,64 @@
     留空 = 取消该 ticker 的目标。
   </p>
 
+  <h2 style="margin-top:24px;">板块目标</h2>
+  <p style="font-size:13px;color:var(--fg-muted);">
+    已设板块目标 <strong>{{ n_with_sector_target }}</strong> 个 · 合计
+    <strong style="color:{% if sector_target_total > 100.1 %}var(--loss){% elif sector_target_total < 99.9 and sector_target_total > 0 %}#d97706{% else %}var(--gain){% endif %};">{{ "%.1f"|format(sector_target_total) }}%</strong>
+    {% if sector_target_total > 100.1 %}（超过 100%）{% elif sector_target_total > 0 and sector_target_total < 99.9 %}（未配满）{% endif %}
+    · 单个 ticker 在目标但整个板块超配，是单纯 ticker drift 抓不到的集中风险。
+  </p>
+  <table style="background:var(--bg-subtle);border-radius:8px;border:1px solid var(--border);overflow:hidden;width:100%;margin-bottom:24px;">
+    <thead>
+      <tr>
+        <th>板块</th>
+        <th class="num">当前价值</th>
+        <th class="num">当前占比</th>
+        <th class="num">目标占比</th>
+        <th class="num">缺口</th>
+        <th>设定</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in sector_rows %}
+      <tr>
+        <td><strong>{{ s.sector }}</strong></td>
+        <td class="num">${{ "{:,.0f}".format(s.current_value) }}</td>
+        <td class="num">{{ "%.2f"|format(s.current_pct) }}%</td>
+        <td class="num">
+          {% if s.target_pct is not none %}<strong>{{ "%.2f"|format(s.target_pct) }}%</strong>{% else %}<span style="color:var(--fg-muted);">未设</span>{% endif %}
+        </td>
+        <td class="num">
+          {% if s.drift is not none %}
+            <strong style="color:{% if s.drift > 0.5 %}var(--gain){% elif s.drift < -0.5 %}var(--loss){% else %}var(--fg-muted){% endif %};">
+              {% if s.drift > 0 %}+{% endif %}{{ "%.2f"|format(s.drift) }}%
+            </strong>
+            <div style="font-size:10px;color:var(--fg-muted);">
+              {% if s.drift > 0 %}欠 ${{ "{:,.0f}".format(s.drift / 100 * portfolio_total) }}{% elif s.drift < 0 %}超 ${{ "{:,.0f}".format(-s.drift / 100 * portfolio_total) }}{% endif %}
+            </div>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          <form method="post" action="/targets/set-sector" style="display:flex;gap:4px;align-items:center;margin:0;">
+            <input type="hidden" name="sector" value="{{ s.sector }}">
+            <input name="target_pct" type="number" step="0.01" min="0" max="100"
+                   value="{{ s.target_pct if s.target_pct is not none else '' }}"
+                   placeholder="留空取消"
+                   style="width:90px;padding:3px 6px;font-size:12px;">
+            <button type="submit" class="btn small secondary" style="padding:3px 8px;font-size:11px;">保存</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h2 style="margin-top:24px;">Ticker 目标</h2>
   <table style="background:var(--bg-subtle);border-radius:8px;border:1px solid var(--border);overflow:hidden;width:100%;">
     <thead>
       <tr>
         <th>Ticker</th>
+        <th>板块</th>
         <th class="num">当前价值</th>
         <th class="num">当前占比</th>
         <th class="num">目标占比</th>
@@ -35,6 +89,7 @@
       {% for r in rows %}
       <tr>
         <td><a href="/decisions/{{ r.symbol }}" style="font-weight:600;">{{ r.symbol }}</a></td>
+        <td style="font-size:12px;color:var(--fg-muted);">{{ r.sector }}</td>
         <td class="num">${{ "{:,.0f}".format(r.current_value) }}</td>
         <td class="num">{{ "%.2f"|format(r.current_pct) }}%</td>
         <td class="num">

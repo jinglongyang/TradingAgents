@@ -153,6 +153,12 @@
                 <span style="color:var(--fg-muted);">{{ "%.2f"|format(i.current_pct) }}%</span>
                 <div style="font-size:10px;color:var(--fg-muted);">未设目标</div>
               {% endif %}
+              {% if i.sector_drift_pct is not none %}
+                <div style="font-size:10px;margin-top:3px;border-top:1px dashed var(--border);padding-top:3px;color:{% if i.sector_drift_pct > 0.5 %}var(--gain){% elif i.sector_drift_pct < -0.5 %}var(--loss){% else %}var(--fg-muted){% endif %};">
+                  板块 {{ i.sector }}:
+                  {% if i.sector_drift_pct > 0 %}欠 {{ "%.1f"|format(i.sector_drift_pct) }}%{% elif i.sector_drift_pct < 0 %}超 {{ "%.1f"|format(-i.sector_drift_pct) }}%{% else %}持平{% endif %}
+                </div>
+              {% endif %}
             </td>
             <td style="font-size:12px;color:var(--fg-muted);max-width:380px;">{{ i.rationale }}</td>
           </tr>

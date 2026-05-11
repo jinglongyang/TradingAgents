@@ -1717,13 +1717,12 @@ def _extract_price_levels(md: str) -> tuple[float | None, float | None]:
 
 def _priority_score(item: dict) -> float:
     """Higher = do first. Composite of rating strength, account tax efficiency,
-    drift to target (capital where the gap is biggest), expected return, and
-    dollar magnitude.
+    ticker drift, sector drift, expected return, and dollar magnitude.
 
-    Weights are chosen so rating dominates the ordering, then tax-efficiency,
-    then under-weight drift (push capital toward target before chasing extras),
-    then expected_return as a tiebreaker, with dollar magnitude only relevant
-    at the margins."""
+    Sector drift gets a sign-aware multiplier (negative = sector overweight =
+    penalty for adding more there) so e.g. five tickers all on-target in an
+    already-overweight sector get pushed below an under-weighted sector's
+    Overweights."""
     import math
     rating = _RATING_WEIGHT.get(item.get("rating"), 1)
     tax = _TAX_WEIGHT.get(item.get("account_type"), 1)
@@ -1731,8 +1730,17 @@ def _priority_score(item: dict) -> float:
     exp_return = item.get("expected_return")  # fraction, e.g. 0.18 = +18%
     return_bonus = (exp_return * 100 * 10) if exp_return is not None else 0
     drift = item.get("drift_pct")  # positive = under target by N%
-    drift_bonus = (max(drift, 0) * 50) if drift is not None else 0
-    return rating * 10000 + tax * 1000 + drift_bonus + return_bonus + math.log10(value + 1) * 5
+    drift_bonus = (drift * 50) if drift is not None else 0
+    sector_drift = item.get("sector_drift_pct")
+    sector_bonus = (sector_drift * 30) if sector_drift is not None else 0
+    return (
+        rating * 10000
+        + tax * 1000
+        + drift_bonus
+        + sector_bonus
+        + return_bonus
+        + math.log10(value + 1) * 5
+    )
 
 
 @app.get("/targets", response_class=HTMLResponse)
@@ -1747,17 +1755,43 @@ def targets_view():
     with connect() as conn:
         snapshot_rows = conn.execute(
             """
-            SELECT symbol, SUM(current_value) AS total_value
-            FROM positions_snapshot
-            WHERE import_date = (SELECT MAX(import_date) FROM positions_snapshot)
-            GROUP BY symbol
+            SELECT p.symbol,
+                   SUM(p.current_value) AS total_value,
+                   COALESCE(t.sector, 'Unknown') AS sector
+            FROM positions_snapshot p
+            LEFT JOIN tickers t ON t.symbol = p.symbol
+            WHERE p.import_date = (SELECT MAX(import_date) FROM positions_snapshot)
+            GROUP BY p.symbol, t.sector
             """
         ).fetchall()
         target_rows = conn.execute("SELECT symbol, target_pct FROM target_weights").fetchall()
+        sector_target_rows = conn.execute("SELECT sector, target_pct FROM sector_targets").fetchall()
 
     portfolio_total = sum(r["total_value"] or 0 for r in snapshot_rows)
     targets = {r["symbol"]: r["target_pct"] for r in target_rows}
+    sector_targets = {r["sector"]: r["target_pct"] for r in sector_target_rows}
     held = {r["symbol"]: (r["total_value"] or 0) for r in snapshot_rows}
+    sym_sector = {r["symbol"]: r["sector"] for r in snapshot_rows}
+
+    # Aggregate by sector
+    sector_value: dict[str, float] = {}
+    for r in snapshot_rows:
+        sector_value[r["sector"]] = sector_value.get(r["sector"], 0) + (r["total_value"] or 0)
+
+    sector_rows = []
+    all_sectors = set(sector_value.keys()) | set(sector_targets.keys())
+    for sec in sorted(all_sectors):
+        value = sector_value.get(sec, 0)
+        cur_pct = (value / portfolio_total * 100) if portfolio_total else 0
+        tgt_pct = sector_targets.get(sec)
+        drift = (tgt_pct - cur_pct) if tgt_pct is not None else None
+        sector_rows.append({
+            "sector": sec,
+            "current_value": value,
+            "current_pct": cur_pct,
+            "target_pct": tgt_pct,
+            "drift": drift,
+        })
 
     rows = []
     all_symbols = set(held.keys()) | set(targets.keys())
@@ -1768,6 +1802,7 @@ def targets_view():
         drift = (tgt_pct - cur_pct) if tgt_pct is not None else None
         rows.append({
             "symbol": sym,
+            "sector": sym_sector.get(sym, "Unknown"),
             "current_value": value,
             "current_pct": cur_pct,
             "target_pct": tgt_pct,
@@ -1775,16 +1810,45 @@ def targets_view():
         })
 
     target_total = sum(t for t in targets.values()) if targets else 0
+    sector_target_total = sum(t for t in sector_targets.values()) if sector_targets else 0
     return templates.TemplateResponse(
         _dummy_request(), "targets.html",
         {
             "css": CSS,
             "rows": rows,
+            "sector_rows": sector_rows,
             "portfolio_total": portfolio_total,
             "target_total": target_total,
+            "sector_target_total": sector_target_total,
             "n_with_target": sum(1 for r in rows if r["target_pct"] is not None),
+            "n_with_sector_target": sum(1 for r in sector_rows if r["target_pct"] is not None),
         },
     )
+
+
+@app.post("/targets/set-sector")
+def set_sector_target(sector: str = Form(...), target_pct: str = Form("")):
+    """Upsert a single sector target, or delete the row when blank."""
+    sec = sector.strip()
+    with connect() as conn:
+        if not target_pct.strip():
+            conn.execute("DELETE FROM sector_targets WHERE sector = ?", (sec,))
+        else:
+            try:
+                pct = float(target_pct)
+            except ValueError:
+                return RedirectResponse(url="/targets", status_code=303)
+            conn.execute(
+                """
+                INSERT INTO sector_targets (sector, target_pct, updated_at)
+                VALUES (?, ?, datetime('now'))
+                ON CONFLICT(sector) DO UPDATE SET
+                    target_pct = excluded.target_pct,
+                    updated_at = excluded.updated_at
+                """,
+                (sec, max(pct, 0)),
+            )
+    return RedirectResponse(url="/targets", status_code=303)
 
 
 @app.post("/targets/set")
@@ -1867,12 +1931,22 @@ def today_view():
             ).fetchall()
         }
         target_rows = conn.execute("SELECT symbol, target_pct FROM target_weights").fetchall()
+        sector_target_rows = conn.execute("SELECT sector, target_pct FROM sector_targets").fetchall()
+        sector_lookup = {
+            r["symbol"]: r["sector"]
+            for r in conn.execute("SELECT symbol, sector FROM tickers WHERE sector IS NOT NULL").fetchall()
+        }
 
     # Per-ticker portfolio aggregates for drift calculation
     target_weights = {r["symbol"]: r["target_pct"] for r in target_rows}
+    sector_target_weights = {r["sector"]: r["target_pct"] for r in sector_target_rows}
     ticker_total: dict[str, float] = {}
+    sector_total: dict[str, float] = {}
     for (_aid, sym), row in snapshot.items():
-        ticker_total[sym] = ticker_total.get(sym, 0) + (row.get("current_value") or 0)
+        v = row.get("current_value") or 0
+        ticker_total[sym] = ticker_total.get(sym, 0) + v
+        sec = sector_lookup.get(sym, "Unknown")
+        sector_total[sec] = sector_total.get(sec, 0) + v
     portfolio_total = sum(ticker_total.values())
 
     # account_name → first observed account_id (decisions only carry the name)
@@ -1914,6 +1988,13 @@ def today_view():
             current_pct = (ticker_total.get(d["symbol"], 0) / portfolio_total * 100) if portfolio_total else 0
             drift_pct = (target_pct - current_pct) if target_pct is not None else None
 
+            # Sector drift: catches "every ticker on-target but the sector is
+            # 50% overweight" concentration. Sector pulled from tickers table.
+            sector = sector_lookup.get(d["symbol"], "Unknown")
+            sector_target = sector_target_weights.get(sector)
+            sector_current_pct = (sector_total.get(sector, 0) / portfolio_total * 100) if portfolio_total else 0
+            sector_drift_pct = (sector_target - sector_current_pct) if sector_target is not None else None
+
             items.append({
                 "ticker": d["symbol"],
                 "rating": d["rating"],
@@ -1934,6 +2015,10 @@ def today_view():
                 "target_pct": target_pct,
                 "current_pct": current_pct,
                 "drift_pct": drift_pct,
+                "sector": sector,
+                "sector_target_pct": sector_target,
+                "sector_current_pct": sector_current_pct,
+                "sector_drift_pct": sector_drift_pct,
                 "rationale": a.get("rationale", ""),
                 "bucket": _ACTION_BUCKETS.get(a.get("action", ""), "hold"),
             })

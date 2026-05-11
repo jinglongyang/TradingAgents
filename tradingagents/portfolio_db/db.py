@@ -200,4 +200,17 @@ def init_db(db_path: Path | None = None) -> Path:
             )
             """
         )
+
+        # Per-sector target weight — catches "every ticker at target but the
+        # sector is 50% overweight" concentration risk that ticker-level
+        # targets miss.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sector_targets (
+                sector       TEXT PRIMARY KEY,
+                target_pct   REAL NOT NULL,
+                updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
     return path
