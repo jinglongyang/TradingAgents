@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Run {{ run_id }}{% endblock %}
+{% block extra_head %}
+<style>
+pre.log { background: var(--bg-subtle); padding: 16px; border-radius: 6px; overflow-x: auto; font-size: 12px; max-height: 70vh; overflow-y: auto; }
+</style>
+{% endblock %}
+
+{% block content %}
+  <h1>Run {{ run_id }}</h1>
+  <div style="margin-bottom:16px;">
+    <a class="btn secondary" href="/runs">← 运行列表</a>
+    {% if has_result %} · <a class="btn small" href="/runs/{{ run_id }}/result">查看结果</a>{% endif %}
+  </div>
+  <pre class="log">{{ log_content }}</pre>
+{% endblock %}

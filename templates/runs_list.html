@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}运行历史{% endblock %}
+{% block extra_head %}<meta http-equiv="refresh" content="10">{% endblock %}
+
+{% block content %}
+  <h1>🏃 运行历史</h1>
+  <p class="subtitle">最近 20 次分析任务</p>
+  <div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>
+
+  {% if runs %}
+    <table>
+      <thead><tr><th>Run ID</th><th>状态</th><th>触发 ticker</th><th>最近活动</th><th>操作</th></tr></thead>
+      <tbody>
+        {% for r in runs %}
+        <tr>
+          <td><code>{{ r.run_id }}</code></td>
+          <td>{{ r.badge }}</td>
+          <td>{{ r.tickers }}</td>
+          <td style="font-size:11px;color:var(--fg-muted);">{{ r.last_line[:80] }}</td>
+          <td>
+            <a href="/runs/{{ r.run_id }}" class="btn small secondary">日志</a>
+            {% if r.has_result %}<a href="/runs/{{ r.run_id }}/result" class="btn small">结果</a>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p style="color:var(--fg-muted);">还没运行过分析 — 用主页 🚀 按钮启动</p>
+  {% endif %}
+
+  <p style="color:var(--fg-muted);font-size:12px;margin-top:24px;">页面每 10 秒自动刷新</p>
+{% endblock %}

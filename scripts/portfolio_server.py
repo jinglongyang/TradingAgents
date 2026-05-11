@@ -25,6 +25,10 @@ load_dotenv(find_dotenv(usecwd=True))
 
 from fastapi import FastAPI, Form  # noqa: E402
 from fastapi.responses import HTMLResponse, RedirectResponse  # noqa: E402
+from fastapi.templating import Jinja2Templates  # noqa: E402
+
+_TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
+templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 from tradingagents.portfolio.holdings import classify_account, AccountType  # noqa: E402
 from tradingagents.portfolio_db import (  # noqa: E402
@@ -274,16 +278,12 @@ def _build_holdings_view():
     return "\n".join(out), len(rows), total
 
 
-def _render(message: str = ""):
-    import json as _json
-    html_view, n_rows, total_val = _build_holdings_view()
-    latest = latest_snapshot_date() or "(none)"
-    today = date.today().isoformat()
-    # Build ticker pool for autocomplete: union of tickers table and any
-    # symbols held in the latest snapshot that aren't there yet.
-    ticker_pool: list[dict[str, str]] = []
-    with connect() as _conn:
-        for r in _conn.execute(
+def _ticker_pool() -> list[dict[str, str]]:
+    """Symbols to suggest in the autocomplete: union of tickers table
+    and any symbols held in the latest snapshot that aren't there yet."""
+    out: list[dict[str, str]] = []
+    with connect() as conn:
+        for r in conn.execute(
             """
             SELECT COALESCE(t.symbol, ps.symbol) AS s,
                    COALESCE(t.name, '') AS n
@@ -295,383 +295,38 @@ def _render(message: str = ""):
             SELECT symbol AS s, COALESCE(name, '') AS n FROM tickers
             """,
         ).fetchall():
-            ticker_pool.append({"s": r["s"], "n": r["n"] or ""})
-    ticker_pool.sort(key=lambda x: x["s"])
-    ticker_json = _json.dumps(ticker_pool, ensure_ascii=False)
-    datalist_html = "".join(
-        f'<option value="{t["s"]}">{t["n"]}</option>' for t in ticker_pool
+            out.append({"s": r["s"], "n": r["n"] or ""})
+    out.sort(key=lambda x: x["s"])
+    return out
+
+
+def _render(message: str = ""):
+    """Render the main holdings page via Jinja2."""
+    import json as _json
+    from starlette.requests import Request as _Req
+    html_view, n_rows, total_val = _build_holdings_view()
+    ticker_pool = _ticker_pool()
+    # Build a minimal stub Request — TemplateResponse needs one even when we
+    # don't actually use url_for / request data.
+    dummy_req = _Req(scope={"type": "http", "headers": [], "method": "GET", "path": "/"})
+    return templates.TemplateResponse(
+        dummy_req,
+        "index.html",
+        {
+            "css": CSS,
+            "extra_js": JS,
+            "holdings_html": html_view,
+            "n_rows": n_rows,
+            "total_val": total_val,
+            "latest": latest_snapshot_date() or "(none)",
+            "today": date.today().isoformat(),
+            "ticker_pool": ticker_pool,
+            "ticker_json": _json.dumps(ticker_pool, ensure_ascii=False),
+            "message": message or "",
+        },
     )
 
-    return f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>持仓管理 — Portfolio Manager</title>
-<style>{CSS}</style>
-</head>
-<body>
-<div class="container">
-  <h1>📊 持仓管理</h1>
-  <p class="subtitle">本地浏览器界面 · 数据存在 ~/.tradingagents/portfolio.db · 任何时候关掉浏览器都不会丢数据</p>
 
-  <form method="get" action="/lookup" style="margin-bottom:20px;display:flex;gap:8px;">
-    <input name="q" list="all-tickers-dl" placeholder="🔍 输入 ticker (如 NVDA, CRWV, IREN) 查看持仓 + PM 评级 + 一键触发分析"
-           style="flex:1;padding:10px 14px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:14px;text-transform:uppercase;"
-           autofocus required autocomplete="off">
-    <button type="submit">查询</button>
-  </form>
-  <datalist id="all-tickers-dl">{datalist_html}</datalist>
-
-  <div class="status">
-    最新 snapshot: <strong>{latest}</strong> · {n_rows} 仓位 · 总价值 <strong>${total_val:,.0f}</strong> · 今天: {today}
-  </div>
-
-  {message}
-
-  <div class="toolbar">
-    <button onclick="openModal('add-modal')">➕ 添加新持仓</button>
-    <button class="success" onclick="openModal('run-modal')">🚀 运行 PM 分析</button>
-    <form method="post" action="/update-prices" style="display:inline;"
-          onsubmit="return confirm('从 yfinance 拉所有持仓 ticker 最新价格？1-2 分钟。')">
-      <button class="secondary" type="submit">📡 更新价格</button>
-    </form>
-    <form method="post" action="/enrich-tickers" style="display:inline;"
-          onsubmit="return confirm('为所有 ticker 拉 sector/name/市值（仅未填的）？慢，约 2-3 分钟。')">
-      <button class="secondary" type="submit">🏷️ 拉 ticker 元数据</button>
-    </form>
-    <a class="btn secondary" href="/owners">👥 按 Owner 看</a>
-    <a class="btn secondary" href="/drift">⚠️ Drift Alert</a>
-    <a class="btn secondary" href="/tlh">💰 TLH Finder</a>
-    <a class="btn secondary" href="/correlation">🔗 相关性热力</a>
-    <a class="btn secondary" href="/wash-sale">🚫 Wash Sale</a>
-    <a class="btn secondary" href="/lots">📦 Cost Basis Lots</a>
-    <a class="btn secondary" href="/decisions">📋 PM 分析</a>
-    <a class="btn secondary" href="/thesis-evolution">📈 Thesis 演变</a>
-    <a class="btn secondary" href="/charts">📊 Charts</a>
-    <a class="btn secondary" href="/sectors">🌐 板块轮动</a>
-    <a class="btn secondary" href="/tickers">🗂️ Tickers</a>
-    <a class="btn secondary" href="/performance">🎯 PM 准确度</a>
-    <a class="btn secondary" href="/runs">🏃 运行历史</a>
-    <a class="btn secondary" href="/executions">📒 交易记录</a>
-    <a class="btn secondary" href="/api/positions" target="_blank">View JSON</a>
-  </div>
-
-  {html_view}
-</div>
-
-<!-- Add Modal -->
-<div class="modal-backdrop" id="add-modal">
-  <div class="modal">
-    <h3>添加新持仓</h3>
-    <form method="post" action="/add">
-      <input type="hidden" name="redirect_anchor" value="">
-      <div class="row">
-        <div class="field"><label>账户 ID <span class="hint">如 RH-IND</span></label><input name="account_id" required></div>
-        <div class="field"><label>账户名</label><input name="account_name" required></div>
-      </div>
-      <div class="field">
-        <label>Owner <span class="hint">Self / Spouse / Joint / Olivia / Amelia / ...</span></label>
-        <input name="owner" value="Self" required>
-      </div>
-      <div class="row">
-        <div class="field">
-          <label>账户类型</label>
-          <select name="account_type">
-            <option value="Taxable" selected>Taxable — 应税</option>
-            <option value="Roth">Roth</option>
-            <option value="TaxDeferred">TaxDeferred — 401k/IRA</option>
-            <option value="ChildEdu">ChildEdu — 529</option>
-          </select>
-        </div>
-        <div class="field">
-          <label>Broker / 平台</label>
-          <select name="broker">
-            <option value="Fidelity">Fidelity</option>
-            <option value="Robinhood" selected>Robinhood</option>
-            <option value="Schwab">Schwab</option>
-            <option value="E-Trade">E-Trade</option>
-            <option value="Vanguard">Vanguard</option>
-            <option value="Interactive Brokers">Interactive Brokers</option>
-            <option value="Merrill Lynch">Merrill Lynch</option>
-            <option value="TD Ameritrade">TD Ameritrade</option>
-            <option value="Other">Other</option>
-          </select>
-        </div>
-      </div>
-      <div class="row">
-        <div class="field"><label>Ticker</label><input name="symbol" required style="text-transform: uppercase"></div>
-        <div class="field"><label>持股数</label><input name="quantity" type="number" step="0.001" required min="0.001"></div>
-      </div>
-      <div class="row">
-        <div class="field"><label>当前价 <span class="hint">留空自动从 yfinance 拉</span></label><input name="last_price" type="number" step="0.01" placeholder="留空 = 自动"></div>
-        <div class="field"><label>每股成本 <span class="hint">Robinhood 显示这个</span></label>
-          <input name="avg_cost" type="number" step="0.01" id="add-avg-cost"
-                 oninput="document.getElementById('add-cost-total').value = (this.value * document.querySelector('#add-modal input[name=\\'quantity\\']').value || 0).toFixed(2)"></div>
-      </div>
-      <div class="field"><label>总成本 <span class="hint">= 每股成本 × 股数，自动算；也可手填</span></label>
-        <input id="add-cost-total" name="cost_basis_total" type="number" step="0.01"></div>
-      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
-        <button type="button" class="secondary" onclick="closeModal('add-modal')">取消</button>
-        <button type="submit" class="success">添加</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<!-- Sell Modal -->
-<div class="modal-backdrop" id="sell-modal">
-  <div class="modal">
-    <h3 id="sell-title">Sell</h3>
-    <form method="post" action="/sell">
-      <input type="hidden" name="redirect_anchor" value="">
-      <input type="hidden" id="sell-symbol" name="symbol">
-      <input type="hidden" id="sell-account-id" name="account_id">
-      <input type="hidden" id="sell-account-name" name="account_name">
-      <div class="field" style="color: var(--fg-muted); font-size: 13px;" id="sell-current"></div>
-      <div class="row">
-        <div class="field"><label>卖出股数</label><input id="sell-qty" name="shares" type="number" step="0.001" required min="0.001"></div>
-        <div class="field"><label>成交价 <span class="hint">每股</span></label><input name="price" type="number" step="0.01" required min="0"></div>
-      </div>
-      <div class="field"><label>备注 <span class="hint">可选</span></label><input name="note" placeholder="如 PM Phase 1 / TLH harvest"></div>
-      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
-        <button type="button" class="secondary" onclick="closeModal('sell-modal')">取消</button>
-        <button type="submit" class="danger">确认卖出</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<!-- Run Analysis Modal -->
-<div class="modal-backdrop" id="run-modal">
-  <div class="modal" style="max-width:560px;">
-    <h3>🚀 运行 PM 分析</h3>
-    <form method="post" action="/run">
-      <div class="field">
-        <label>分析类型</label>
-        <select name="mode" onchange="toggleRunMode(this.value)">
-          <option value="tickers" selected>📊 Ticker 列表分析（持仓 / 新股票 / 单只）</option>
-          <option value="sector">🏭 行业分析（LLM 推荐 ticker + 逐个分析）</option>
-          <option value="all">📈 全部持仓重跑（所有持仓 ticker）</option>
-        </select>
-      </div>
-
-      <div class="field" id="run-tickers-field">
-        <label>Ticker(s) <span class="hint">逗号 / 空格 / 顿号都可分隔，如 NVDA,CRWV 或 NVDA AMD CRWV（持仓 ticker 带账户上下文，新 ticker 用探索性分析）</span></label>
-        <div style="position:relative;">
-          <input name="tickers" id="run-tickers-input" placeholder="NVDA, CRWV 或 NVDA AMD"
-                 autocomplete="off" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:14px;text-transform:uppercase;">
-          <div id="run-tickers-suggest" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;margin-top:2px;max-height:240px;overflow-y:auto;z-index:1000;box-shadow:0 4px 12px rgba(0,0,0,0.1);"></div>
-        </div>
-      </div>
-
-      <div class="field" id="run-sector-field" style="display:none;">
-        <label>行业 / 主题描述 <span class="hint">中文 OK，如 "AI 算力" / "GLP-1 减肥药" / "半导体周期"</span></label>
-        <input name="sector" placeholder="AI infrastructure 或 GLP-1 减肥药">
-        <p style="margin-top:6px;font-size:12px;color:var(--fg-muted);">系统会让 LLM 列 5-10 个该行业的代表性 ticker，逐个跑分析，最后给推荐 / 不推荐汇总。</p>
-      </div>
-
-      <div class="field">
-        <label>额外指令 <span class="hint">可选，注入到 PM prompt（如税务约束 / 时间窗口）</span></label>
-        <textarea name="instruction" rows="3" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-family:inherit;font-size:14px;resize:vertical;" placeholder="例如：我下个月房产购买，避免 $5K+ 资本利得；优先 TLH"></textarea>
-      </div>
-
-      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
-        <button type="button" class="secondary" onclick="closeModal('run-modal')">取消</button>
-        <button type="submit" class="success">🚀 启动分析</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<script>
-function toggleRunMode(mode) {{
-    document.getElementById('run-tickers-field').style.display = mode === 'tickers' ? '' : 'none';
-    document.getElementById('run-sector-field').style.display = mode === 'sector' ? '' : 'none';
-}}
-
-// Token-aware autocomplete for the multi-ticker input.
-// Splits on the same separator the server uses, completes only the
-// last token, and inserts " " after pick so the user keeps typing.
-(function() {{
-    const KNOWN = {ticker_json};
-    const input = document.getElementById('run-tickers-input');
-    const box = document.getElementById('run-tickers-suggest');
-    if (!input || !box) return;
-    let activeIdx = -1;
-    let matches = [];
-
-    function lastToken(value, caret) {{
-        const before = value.slice(0, caret);
-        const m = before.match(/[^\\s,，、;]*$/);
-        return m ? m[0] : '';
-    }}
-
-    function render() {{
-        while (box.firstChild) box.removeChild(box.firstChild);
-        if (matches.length === 0) {{ box.style.display = 'none'; return; }}
-        matches.forEach((t, i) => {{
-            const row = document.createElement('div');
-            row.dataset.idx = String(i);
-            row.style.cssText = 'padding:6px 12px;cursor:pointer;' + (i === activeIdx ? 'background:var(--bg-subtle);' : '');
-            const sym = document.createElement('strong');
-            sym.textContent = t.s;
-            row.appendChild(sym);
-            if (t.n) {{
-                const nm = document.createElement('span');
-                nm.style.cssText = 'color:var(--fg-muted);font-size:12px;margin-left:8px;';
-                nm.textContent = t.n;
-                row.appendChild(nm);
-            }}
-            box.appendChild(row);
-        }});
-        box.style.display = 'block';
-    }}
-
-    function pick(idx) {{
-        if (idx < 0 || idx >= matches.length) return;
-        const caret = input.selectionStart;
-        const value = input.value;
-        const before = value.slice(0, caret);
-        const after = value.slice(caret);
-        const newBefore = before.replace(/[^\\s,，、;]*$/, matches[idx].s + ' ');
-        input.value = newBefore + after;
-        const newCaret = newBefore.length;
-        input.setSelectionRange(newCaret, newCaret);
-        matches = []; activeIdx = -1; render();
-        input.focus();
-    }}
-
-    input.addEventListener('input', () => {{
-        const tok = lastToken(input.value, input.selectionStart).toUpperCase();
-        if (!tok) {{ matches = []; render(); return; }}
-        matches = KNOWN.filter(t => t.s.startsWith(tok) || (t.n && t.n.toUpperCase().includes(tok))).slice(0, 8);
-        activeIdx = matches.length ? 0 : -1;
-        render();
-    }});
-
-    input.addEventListener('keydown', (e) => {{
-        if (box.style.display === 'none') return;
-        if (e.key === 'ArrowDown') {{ e.preventDefault(); activeIdx = Math.min(activeIdx + 1, matches.length - 1); render(); }}
-        else if (e.key === 'ArrowUp') {{ e.preventDefault(); activeIdx = Math.max(activeIdx - 1, 0); render(); }}
-        else if (e.key === 'Enter' && activeIdx >= 0) {{ e.preventDefault(); pick(activeIdx); }}
-        else if (e.key === 'Escape') {{ matches = []; render(); }}
-    }});
-
-    box.addEventListener('mousedown', (e) => {{
-        const target = e.target.closest('[data-idx]');
-        if (!target) return;
-        e.preventDefault();
-        pick(parseInt(target.dataset.idx, 10));
-    }});
-
-    input.addEventListener('blur', () => {{ setTimeout(() => {{ matches = []; render(); }}, 150); }});
-}})();
-</script>
-
-<!-- Account-level Edit Modal -->
-<div class="modal-backdrop" id="acct-edit-modal">
-  <div class="modal">
-    <h3 id="acct-edit-title">编辑账户</h3>
-    <p style="color:var(--fg-muted);font-size:13px;">修改会应用到本账户的所有持仓行（按 account_id 匹配）</p>
-    <form method="post" action="/account-edit">
-      <input type="hidden" name="redirect_anchor" id="acct-edit-anchor" value="">
-      <input type="hidden" id="acct-edit-id" name="account_id">
-      <div class="field">
-        <label>账户名 <span class="hint">如 "Merrill CMA" / "Robinhood 个人户"</span></label>
-        <input id="acct-edit-name-input" name="account_name" required>
-      </div>
-      <div class="field">
-        <label>Owner / 所有者 <span class="hint">如 Self / Spouse / Joint / Olivia / Amelia</span></label>
-        <input id="acct-edit-owner-input" name="owner" placeholder="Self / Spouse / Joint / Child name" required>
-      </div>
-      <div class="row">
-        <div class="field">
-          <label>账户类型</label>
-          <select id="acct-edit-type-select" name="account_type">
-            <option value="Taxable">Taxable — 应税</option>
-            <option value="Roth">Roth</option>
-            <option value="TaxDeferred">TaxDeferred — 401k/IRA</option>
-            <option value="ChildEdu">ChildEdu — 529</option>
-            <option value="Unknown">Unknown</option>
-          </select>
-        </div>
-        <div class="field">
-          <label>Broker / 平台</label>
-          <select id="acct-edit-broker-select" name="broker">
-            <option value="Fidelity">Fidelity</option>
-            <option value="Robinhood">Robinhood</option>
-            <option value="Schwab">Schwab</option>
-            <option value="E-Trade">E-Trade</option>
-            <option value="Vanguard">Vanguard</option>
-            <option value="Interactive Brokers">Interactive Brokers</option>
-            <option value="Merrill Lynch">Merrill Lynch</option>
-            <option value="TD Ameritrade">TD Ameritrade</option>
-            <option value="Other">Other</option>
-          </select>
-        </div>
-      </div>
-      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
-        <button type="button" class="secondary" onclick="closeModal('acct-edit-modal')">取消</button>
-        <button type="submit">应用到所有行</button>
-      </div>
-    </form>
-    <hr style="margin:20px 0;border:none;border-top:1px solid var(--border);">
-    <details>
-      <summary style="cursor:pointer;color:var(--danger);font-size:13px;">⚠️ 危险区域 — 删除整个账户</summary>
-      <p style="font-size:12px;color:var(--fg-muted);margin-top:10px;">删除该账户的所有持仓行。<strong>不影响已记录的交易（executions）</strong>。如果是 CSV import 进来的，下次 import-csv 会重新添加。</p>
-      <form method="post" action="/account-delete" onsubmit="return confirm('确认删除此账户的所有持仓行吗？此操作只删持仓，不影响交易记录。')" style="margin-top:8px;">
-        <input type="hidden" id="acct-delete-id" name="account_id">
-        <button type="submit" class="danger" style="width:100%;">🗑️ 删除整个账户</button>
-      </form>
-    </details>
-  </div>
-</div>
-
-<!-- Edit Modal -->
-<div class="modal-backdrop" id="edit-modal">
-  <div class="modal">
-    <h3 id="edit-title">Edit</h3>
-    <form method="post" action="/edit">
-      <input type="hidden" name="redirect_anchor" value="">
-      <input type="hidden" id="edit-snapshot-id" name="snapshot_id">
-      <div class="field"><label>Ticker <span class="hint">readonly</span></label><input id="edit-symbol" readonly style="background:var(--bg-subtle);"></div>
-      <div class="row">
-        <div class="field"><label>持股数</label>
-          <input id="edit-qty" name="quantity" type="number" step="0.001" required
-                 oninput="const ac=document.getElementById('edit-avg-cost'); if(ac.value) document.getElementById('edit-cost').value = (ac.value * this.value || 0).toFixed(2)"></div>
-        <div class="field"><label>当前价</label><input id="edit-price" name="last_price" type="number" step="0.01"></div>
-      </div>
-      <div class="row">
-        <div class="field"><label>每股成本 <span class="hint">Robinhood 显示这个</span></label>
-          <input id="edit-avg-cost" type="number" step="0.01"
-                 oninput="document.getElementById('edit-cost').value = (this.value * document.getElementById('edit-qty').value || 0).toFixed(2)"></div>
-        <div class="field"><label>总成本 <span class="hint">自动算或手填</span></label>
-          <input id="edit-cost" name="cost_basis_total" type="number" step="0.01"></div>
-      </div>
-      <div class="field">
-        <label>Broker / 平台</label>
-        <select id="edit-broker" name="broker">
-          <option value="Fidelity">Fidelity</option>
-          <option value="Robinhood">Robinhood</option>
-          <option value="Schwab">Schwab</option>
-          <option value="E-Trade">E-Trade</option>
-          <option value="Vanguard">Vanguard</option>
-          <option value="Interactive Brokers">Interactive Brokers</option>
-          <option value="Merrill Lynch">Merrill Lynch</option>
-          <option value="TD Ameritrade">TD Ameritrade</option>
-          <option value="Other">Other</option>
-        </select>
-      </div>
-      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
-        <button type="button" class="secondary" onclick="closeModal('edit-modal')">取消</button>
-        <button type="submit">保存</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<script>{JS}</script>
-</body></html>"""
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -2599,58 +2254,55 @@ def _find_output_dir_for_run(log_path: str) -> Path | None:
     return p if p.exists() else None
 
 
+_STATUS_BADGE = {
+    "running": "🟡 进行中",
+    "done": "✅ 完成",
+    "failed": "❌ 失败",
+    "queued": "⏳ 排队",
+}
+
+
+def _dummy_request():
+    from starlette.requests import Request as _Req
+    return _Req(scope={"type": "http", "headers": [], "method": "GET", "path": "/"})
+
+
 @app.get("/runs", response_class=HTMLResponse)
 def runs_view():
     """List all pm_run_*.log files with their current status."""
     import glob as _g
     logs = sorted(_g.glob("/tmp/pm_run_*.log"), reverse=True)[:20]
-
-    body = ['<h1>🏃 运行历史</h1>',
-            '<p class="subtitle">最近 20 次分析任务</p>',
-            '<div style="margin-bottom:16px;"><a class="btn secondary" href="/">← 持仓</a></div>']
-
-    if not logs:
-        body.append('<p style="color:var(--fg-muted);">还没运行过分析 — 用主页 🚀 按钮启动</p>')
-    else:
-        body.append('<table><thead><tr><th>Run ID</th><th>状态</th><th>触发 ticker</th><th>最近活动</th><th>操作</th></tr></thead><tbody>')
-        for log in logs:
-            run_id = log.replace("/tmp/pm_run_", "").replace(".log", "")
-            status_path = log.replace(".log", ".status")
-            status = "unknown"
-            tickers = ""
-            if Path(status_path).exists():
-                content = Path(status_path).read_text()
-                status = content.splitlines()[0] if content else "?"
-                for line in content.splitlines():
-                    if line.startswith("tickers="):
-                        tickers = line.split("=", 1)[1]
-            # last log line
-            last_line = ""
-            try:
-                with open(log) as f:
-                    last_line = f.readlines()[-1] if f.readlines else ""
-            except Exception:
-                pass
-            badge = {"running": "🟡 进行中", "done": "✅ 完成", "failed": "❌ 失败", "queued": "⏳ 排队"}.get(status, status)
-            actions = f'<a href="/runs/{run_id}" class="btn small secondary">日志</a>'
-            if _find_output_dir_for_run(log) is not None:
-                actions += f' <a href="/runs/{run_id}/result" class="btn small">结果</a>'
-            body.append(
-                f'<tr><td><code>{run_id}</code></td>'
-                f'<td>{badge}</td>'
-                f'<td>{tickers}</td>'
-                f'<td style="font-size:11px;color:var(--fg-muted);">{last_line[:80]}</td>'
-                f'<td>{actions}</td></tr>'
-            )
-        body.append('</tbody></table>')
-
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>运行历史</title><style>{CSS}</style>
-<meta http-equiv="refresh" content="10">
-</head><body><div class="container">
-{''.join(body)}
-<p style="color:var(--fg-muted);font-size:12px;margin-top:24px;">页面每 10 秒自动刷新</p>
-</div></body></html>"""
+    runs = []
+    for log in logs:
+        run_id = log.replace("/tmp/pm_run_", "").replace(".log", "")
+        status_path = log.replace(".log", ".status")
+        status = "unknown"
+        tickers = ""
+        if Path(status_path).exists():
+            content = Path(status_path).read_text()
+            status = content.splitlines()[0] if content else "?"
+            for line in content.splitlines():
+                if line.startswith("tickers="):
+                    tickers = line.split("=", 1)[1]
+        last_line = ""
+        try:
+            with open(log) as f:
+                lines = f.readlines()
+            last_line = lines[-1] if lines else ""
+        except Exception:
+            pass
+        runs.append({
+            "run_id": run_id,
+            "badge": _STATUS_BADGE.get(status, status),
+            "tickers": tickers,
+            "last_line": last_line,
+            "has_result": _find_output_dir_for_run(log) is not None,
+        })
+    return templates.TemplateResponse(
+        _dummy_request(),
+        "runs_list.html",
+        {"css": CSS, "runs": runs},
+    )
 
 
 @app.get("/runs/{run_id}", response_class=HTMLResponse)
@@ -2658,17 +2310,17 @@ def run_detail(run_id: str):
     log_path = f"/tmp/pm_run_{run_id}.log"
     if not Path(log_path).exists():
         return HTMLResponse(f"<p>Run {run_id} 不存在</p><a href='/runs'>← Back</a>")
-    log_content = Path(log_path).read_text()[-10000:]  # tail
-    result_link = ""
-    if _find_output_dir_for_run(log_path) is not None:
-        result_link = f' · <a class="btn small" href="/runs/{run_id}/result">查看结果</a>'
-    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Run {run_id}</title><style>{CSS}
-pre {{ background: var(--bg-subtle); padding: 16px; border-radius: 6px; overflow-x: auto; font-size: 12px; max-height: 70vh; overflow-y: auto; }}
-</style></head><body><div class="container">
-<h1>Run {run_id}</h1>
-<div style="margin-bottom:16px;"><a class="btn secondary" href="/runs">← 运行列表</a>{result_link}</div>
-<pre>{log_content}</pre>
-</div></body></html>"""
+    log_content = Path(log_path).read_text()[-10000:]
+    return templates.TemplateResponse(
+        _dummy_request(),
+        "runs_detail.html",
+        {
+            "css": CSS,
+            "run_id": run_id,
+            "log_content": log_content,
+            "has_result": _find_output_dir_for_run(log_path) is not None,
+        },
+    )
 
 
 @app.get("/runs/{run_id}/result", response_class=HTMLResponse)
@@ -2686,71 +2338,48 @@ def run_result(run_id: str):
 
     import markdown as _md
 
-    # 1. Render REPORT.md
     report_path = out_dir / "REPORT.md"
-    report_html = ""
     if report_path.exists():
         report_html = _md.markdown(report_path.read_text(encoding="utf-8"), extensions=["tables", "fenced_code"])
     else:
         report_html = "<p style='color:var(--fg-muted);'>REPORT.md not found in output dir.</p>"
 
-    # 2. Pull decisions from DB for the tickers in this run (latest only)
     log_text = Path(log_path).read_text()
     m = re.search(r"Will analyze \d+ ticker\(s\):\s*([^\n]+)", log_text)
     tickers_for_run = [t.strip() for t in (m.group(1) if m else "").split(",") if t.strip()]
-    db_rows = []
+    decisions: list[dict] = []
     if tickers_for_run:
         with connect() as conn:
             placeholders = ",".join("?" * len(tickers_for_run))
-            db_rows = conn.execute(
+            seen: set[str] = set()
+            for r in conn.execute(
                 f"""
-                SELECT symbol, trade_date, rating, created_at, decision_id
+                SELECT symbol, trade_date, rating, created_at
                   FROM decisions
                  WHERE symbol IN ({placeholders})
                  ORDER BY decision_id DESC
                 """,
                 tickers_for_run,
-            ).fetchall()
-    seen: set[str] = set()
-    latest_decisions = []
-    for r in db_rows:
-        if r["symbol"] in seen:
-            continue
-        seen.add(r["symbol"])
-        latest_decisions.append(r)
+            ).fetchall():
+                if r["symbol"] in seen:
+                    continue
+                seen.add(r["symbol"])
+                decisions.append(dict(r))
 
-    decision_rows_html = ""
-    if latest_decisions:
-        decision_rows_html = "".join(
-            f'<tr><td><strong><a href="/decisions/{r["symbol"]}">{r["symbol"]}</a></strong></td>'
-            f'<td>{r["rating"]}</td>'
-            f'<td>{r["trade_date"]}</td>'
-            f'<td style="font-size:11px;color:var(--fg-muted);">{r["created_at"]}</td></tr>'
-            for r in latest_decisions
-        )
+    project_root = Path(__file__).resolve().parent.parent
+    rel_dir = out_dir.relative_to(project_root) if str(out_dir).startswith(str(project_root)) else out_dir
 
-    rel_dir = out_dir.relative_to(Path(__file__).resolve().parent.parent) if str(out_dir).startswith(str(Path(__file__).resolve().parent.parent)) else out_dir
-
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Run {run_id} — 结果</title><style>{CSS}
-.report {{ background: var(--bg-subtle); padding: 24px; border-radius: 8px; line-height: 1.7; }}
-.report h1, .report h2, .report h3 {{ margin-top: 24px; }}
-.report table {{ margin: 12px 0; }}
-.report code {{ background: rgba(125,125,125,0.1); padding: 1px 6px; border-radius: 3px; font-size: 90%; }}
-</style></head><body><div class="container">
-<h1>📊 Run {run_id} — 结果</h1>
-<div style="margin-bottom:16px;">
-  <a class="btn secondary" href="/runs">← 运行列表</a>
-  <a class="btn secondary" href="/runs/{run_id}">查看日志</a>
-  <span style="color:var(--fg-muted);font-size:12px;margin-left:12px;">输出目录: <code>{rel_dir}</code></span>
-</div>
-
-<h2>本次 PM 评级（从 DB 拉最新）</h2>
-{('<table><thead><tr><th>Ticker</th><th>Rating</th><th>Trade Date</th><th>Created</th></tr></thead><tbody>' + decision_rows_html + '</tbody></table>') if decision_rows_html else '<p style="color:var(--fg-muted);">没在 DB 找到这次 run 的决定 — 可能 migrate 还没跑或失败了</p>'}
-
-<h2>REPORT.md</h2>
-<div class="report">{report_html}</div>
-</div></body></html>"""
+    return templates.TemplateResponse(
+        _dummy_request(),
+        "runs_result.html",
+        {
+            "css": CSS,
+            "run_id": run_id,
+            "rel_dir": str(rel_dir),
+            "decisions": decisions,
+            "report_html": report_html,
+        },
+    )
 
 
 @app.get("/api/positions")

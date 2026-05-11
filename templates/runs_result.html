@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Run {{ run_id }} — 结果{% endblock %}
+{% block extra_head %}
+<style>
+.report { background: var(--bg-subtle); padding: 24px; border-radius: 8px; line-height: 1.7; }
+.report h1, .report h2, .report h3 { margin-top: 24px; }
+.report table { margin: 12px 0; }
+.report code { background: rgba(125,125,125,0.1); padding: 1px 6px; border-radius: 3px; font-size: 90%; }
+</style>
+{% endblock %}
+
+{% block content %}
+  <h1>📊 Run {{ run_id }} — 结果</h1>
+  <div style="margin-bottom:16px;">
+    <a class="btn secondary" href="/runs">← 运行列表</a>
+    <a class="btn secondary" href="/runs/{{ run_id }}">查看日志</a>
+    <span style="color:var(--fg-muted);font-size:12px;margin-left:12px;">输出目录: <code>{{ rel_dir }}</code></span>
+  </div>
+
+  <h2>本次 PM 评级（从 DB 拉最新）</h2>
+  {% if decisions %}
+    <table>
+      <thead><tr><th>Ticker</th><th>Rating</th><th>Trade Date</th><th>Created</th></tr></thead>
+      <tbody>
+        {% for d in decisions %}
+        <tr>
+          <td><strong><a href="/decisions/{{ d.symbol }}">{{ d.symbol }}</a></strong></td>
+          <td>{{ d.rating }}</td>
+          <td>{{ d.trade_date }}</td>
+          <td style="font-size:11px;color:var(--fg-muted);">{{ d.created_at }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p style="color:var(--fg-muted);">没在 DB 找到这次 run 的决定 — 可能 migrate 还没跑或失败了</p>
+  {% endif %}
+
+  <h2>REPORT.md</h2>
+  <div class="report">{{ report_html|safe }}</div>
+{% endblock %}

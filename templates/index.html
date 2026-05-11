@@ -1,0 +1,367 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <h1>📊 持仓管理</h1>
+  <p class="subtitle">本地浏览器界面 · 数据存在 ~/.tradingagents/portfolio.db · 任何时候关掉浏览器都不会丢数据</p>
+
+  <form method="get" action="/lookup" style="margin-bottom:20px;display:flex;gap:8px;">
+    <input name="q" list="all-tickers-dl"
+           placeholder="🔍 输入 ticker (如 NVDA, CRWV, IREN) 查看持仓 + PM 评级 + 一键触发分析"
+           style="flex:1;padding:10px 14px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:14px;text-transform:uppercase;"
+           autofocus required autocomplete="off">
+    <button type="submit">查询</button>
+  </form>
+  <datalist id="all-tickers-dl">
+    {% for t in ticker_pool %}<option value="{{ t.s }}">{{ t.n }}</option>{% endfor %}
+  </datalist>
+
+  <div class="status">
+    最新 snapshot: <strong>{{ latest }}</strong> · {{ n_rows }} 仓位 · 总价值 <strong>${{ "{:,.0f}".format(total_val) }}</strong> · 今天: {{ today }}
+  </div>
+
+  {{ message|safe }}
+
+  <div class="toolbar">
+    <button onclick="openModal('add-modal')">➕ 添加新持仓</button>
+    <button class="success" onclick="openModal('run-modal')">🚀 运行 PM 分析</button>
+    <form method="post" action="/update-prices" style="display:inline;"
+          onsubmit="return confirm('从 yfinance 拉所有持仓 ticker 最新价格？1-2 分钟。')">
+      <button class="secondary" type="submit">📡 更新价格</button>
+    </form>
+    <form method="post" action="/enrich-tickers" style="display:inline;"
+          onsubmit="return confirm('为所有 ticker 拉 sector/name/市值（仅未填的）？慢，约 2-3 分钟。')">
+      <button class="secondary" type="submit">🏷️ 拉 ticker 元数据</button>
+    </form>
+    <a class="btn secondary" href="/owners">👥 按 Owner 看</a>
+    <a class="btn secondary" href="/drift">⚠️ Drift Alert</a>
+    <a class="btn secondary" href="/tlh">💰 TLH Finder</a>
+    <a class="btn secondary" href="/correlation">🔗 相关性热力</a>
+    <a class="btn secondary" href="/wash-sale">🚫 Wash Sale</a>
+    <a class="btn secondary" href="/lots">📦 Cost Basis Lots</a>
+    <a class="btn secondary" href="/decisions">📋 PM 分析</a>
+    <a class="btn secondary" href="/thesis-evolution">📈 Thesis 演变</a>
+    <a class="btn secondary" href="/charts">📊 Charts</a>
+    <a class="btn secondary" href="/sectors">🌐 板块轮动</a>
+    <a class="btn secondary" href="/tickers">🗂️ Tickers</a>
+    <a class="btn secondary" href="/performance">🎯 PM 准确度</a>
+    <a class="btn secondary" href="/runs">🏃 运行历史</a>
+    <a class="btn secondary" href="/executions">📒 交易记录</a>
+    <a class="btn secondary" href="/api/positions" target="_blank">View JSON</a>
+  </div>
+
+  {{ holdings_html|safe }}
+
+  {# ---------- Add Modal ---------- #}
+  <div class="modal-backdrop" id="add-modal">
+    <div class="modal">
+      <h3>添加新持仓</h3>
+      <form method="post" action="/add">
+        <input type="hidden" name="redirect_anchor" value="">
+        <div class="row">
+          <div class="field"><label>账户 ID <span class="hint">如 RH-IND</span></label><input name="account_id" required></div>
+          <div class="field"><label>账户名</label><input name="account_name" required></div>
+        </div>
+        <div class="field">
+          <label>Owner <span class="hint">Self / Spouse / Joint / Olivia / Amelia / ...</span></label>
+          <input name="owner" value="Self" required>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>账户类型</label>
+            <select name="account_type">
+              <option value="Taxable" selected>Taxable — 应税</option>
+              <option value="Roth">Roth</option>
+              <option value="TaxDeferred">TaxDeferred — 401k/IRA</option>
+              <option value="ChildEdu">ChildEdu — 529</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Broker / 平台</label>
+            <select name="broker">
+              <option value="Fidelity">Fidelity</option>
+              <option value="Robinhood" selected>Robinhood</option>
+              <option value="Schwab">Schwab</option>
+              <option value="E-Trade">E-Trade</option>
+              <option value="Vanguard">Vanguard</option>
+              <option value="Interactive Brokers">Interactive Brokers</option>
+              <option value="Merrill Lynch">Merrill Lynch</option>
+              <option value="TD Ameritrade">TD Ameritrade</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Ticker</label><input name="symbol" required style="text-transform: uppercase"></div>
+          <div class="field"><label>持股数</label><input name="quantity" type="number" step="0.001" required min="0.001"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>当前价 <span class="hint">留空自动从 yfinance 拉</span></label><input name="last_price" type="number" step="0.01" placeholder="留空 = 自动"></div>
+          <div class="field"><label>每股成本 <span class="hint">Robinhood 显示这个</span></label>
+            <input name="avg_cost" type="number" step="0.01" id="add-avg-cost"
+                   oninput="document.getElementById('add-cost-total').value = (this.value * document.querySelector('#add-modal input[name=&quot;quantity&quot;]').value || 0).toFixed(2)"></div>
+        </div>
+        <div class="field"><label>总成本 <span class="hint">= 每股成本 × 股数，自动算；也可手填</span></label>
+          <input id="add-cost-total" name="cost_basis_total" type="number" step="0.01"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+          <button type="button" class="secondary" onclick="closeModal('add-modal')">取消</button>
+          <button type="submit" class="success">添加</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  {# ---------- Sell Modal ---------- #}
+  <div class="modal-backdrop" id="sell-modal">
+    <div class="modal">
+      <h3 id="sell-title">Sell</h3>
+      <form method="post" action="/sell">
+        <input type="hidden" name="redirect_anchor" value="">
+        <input type="hidden" id="sell-symbol" name="symbol">
+        <input type="hidden" id="sell-account-id" name="account_id">
+        <input type="hidden" id="sell-account-name" name="account_name">
+        <div class="field" style="color: var(--fg-muted); font-size: 13px;" id="sell-current"></div>
+        <div class="row">
+          <div class="field"><label>卖出股数</label><input id="sell-qty" name="shares" type="number" step="0.001" required min="0.001"></div>
+          <div class="field"><label>成交价 <span class="hint">每股</span></label><input name="price" type="number" step="0.01" required min="0"></div>
+        </div>
+        <div class="field"><label>备注 <span class="hint">可选</span></label><input name="note" placeholder="如 PM Phase 1 / TLH harvest"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+          <button type="button" class="secondary" onclick="closeModal('sell-modal')">取消</button>
+          <button type="submit" class="danger">确认卖出</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  {# ---------- Run Analysis Modal ---------- #}
+  <div class="modal-backdrop" id="run-modal">
+    <div class="modal" style="max-width:560px;">
+      <h3>🚀 运行 PM 分析</h3>
+      <form method="post" action="/run">
+        <div class="field">
+          <label>分析类型</label>
+          <select name="mode" onchange="toggleRunMode(this.value)">
+            <option value="tickers" selected>📊 Ticker 列表分析（持仓 / 新股票 / 单只）</option>
+            <option value="sector">🏭 行业分析（LLM 推荐 ticker + 逐个分析）</option>
+            <option value="all">📈 全部持仓重跑（所有持仓 ticker）</option>
+          </select>
+        </div>
+
+        <div class="field" id="run-tickers-field">
+          <label>Ticker(s) <span class="hint">逗号 / 空格 / 顿号都可分隔，如 NVDA,CRWV 或 NVDA AMD CRWV（持仓 ticker 带账户上下文，新 ticker 用探索性分析）</span></label>
+          <div style="position:relative;">
+            <input name="tickers" id="run-tickers-input" placeholder="NVDA, CRWV 或 NVDA AMD"
+                   autocomplete="off" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:14px;text-transform:uppercase;">
+            <div id="run-tickers-suggest" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;margin-top:2px;max-height:240px;overflow-y:auto;z-index:1000;box-shadow:0 4px 12px rgba(0,0,0,0.1);"></div>
+          </div>
+        </div>
+
+        <div class="field" id="run-sector-field" style="display:none;">
+          <label>行业 / 主题描述 <span class="hint">中文 OK，如 "AI 算力" / "GLP-1 减肥药" / "半导体周期"</span></label>
+          <input name="sector" placeholder="AI infrastructure 或 GLP-1 减肥药">
+          <p style="margin-top:6px;font-size:12px;color:var(--fg-muted);">系统会让 LLM 列 5-10 个该行业的代表性 ticker，逐个跑分析，最后给推荐 / 不推荐汇总。</p>
+        </div>
+
+        <div class="field">
+          <label>额外指令 <span class="hint">可选，注入到 PM prompt（如税务约束 / 时间窗口）</span></label>
+          <textarea name="instruction" rows="3" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-family:inherit;font-size:14px;resize:vertical;" placeholder="例如：我下个月房产购买，避免 $5K+ 资本利得；优先 TLH"></textarea>
+        </div>
+
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+          <button type="button" class="secondary" onclick="closeModal('run-modal')">取消</button>
+          <button type="submit" class="success">🚀 启动分析</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  {# ---------- Account-level Edit Modal ---------- #}
+  <div class="modal-backdrop" id="acct-edit-modal">
+    <div class="modal">
+      <h3 id="acct-edit-title">编辑账户</h3>
+      <p style="color:var(--fg-muted);font-size:13px;">修改会应用到本账户的所有持仓行（按 account_id 匹配）</p>
+      <form method="post" action="/account-edit">
+        <input type="hidden" name="redirect_anchor" id="acct-edit-anchor" value="">
+        <input type="hidden" id="acct-edit-id" name="account_id">
+        <div class="field">
+          <label>账户名 <span class="hint">如 "Merrill CMA" / "Robinhood 个人户"</span></label>
+          <input id="acct-edit-name-input" name="account_name" required>
+        </div>
+        <div class="field">
+          <label>Owner / 所有者 <span class="hint">如 Self / Spouse / Joint / Olivia / Amelia</span></label>
+          <input id="acct-edit-owner-input" name="owner" placeholder="Self / Spouse / Joint / Child name" required>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>账户类型</label>
+            <select id="acct-edit-type-select" name="account_type">
+              <option value="Taxable">Taxable — 应税</option>
+              <option value="Roth">Roth</option>
+              <option value="TaxDeferred">TaxDeferred — 401k/IRA</option>
+              <option value="ChildEdu">ChildEdu — 529</option>
+              <option value="Unknown">Unknown</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Broker / 平台</label>
+            <select id="acct-edit-broker-select" name="broker">
+              <option value="Fidelity">Fidelity</option>
+              <option value="Robinhood">Robinhood</option>
+              <option value="Schwab">Schwab</option>
+              <option value="E-Trade">E-Trade</option>
+              <option value="Vanguard">Vanguard</option>
+              <option value="Interactive Brokers">Interactive Brokers</option>
+              <option value="Merrill Lynch">Merrill Lynch</option>
+              <option value="TD Ameritrade">TD Ameritrade</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+          <button type="button" class="secondary" onclick="closeModal('acct-edit-modal')">取消</button>
+          <button type="submit">应用到所有行</button>
+        </div>
+      </form>
+      <hr style="margin:20px 0;border:none;border-top:1px solid var(--border);">
+      <details>
+        <summary style="cursor:pointer;color:var(--danger);font-size:13px;">⚠️ 危险区域 — 删除整个账户</summary>
+        <p style="font-size:12px;color:var(--fg-muted);margin-top:10px;">删除该账户的所有持仓行。<strong>不影响已记录的交易（executions）</strong>。如果是 CSV import 进来的，下次 import-csv 会重新添加。</p>
+        <form method="post" action="/account-delete" onsubmit="return confirm('确认删除此账户的所有持仓行吗？此操作只删持仓，不影响交易记录。')" style="margin-top:8px;">
+          <input type="hidden" id="acct-delete-id" name="account_id">
+          <button type="submit" class="danger" style="width:100%;">🗑️ 删除整个账户</button>
+        </form>
+      </details>
+    </div>
+  </div>
+
+  {# ---------- Per-row Edit Modal ---------- #}
+  <div class="modal-backdrop" id="edit-modal">
+    <div class="modal">
+      <h3 id="edit-title">Edit</h3>
+      <form method="post" action="/edit">
+        <input type="hidden" name="redirect_anchor" value="">
+        <input type="hidden" id="edit-snapshot-id" name="snapshot_id">
+        <div class="field"><label>Ticker <span class="hint">readonly</span></label><input id="edit-symbol" readonly style="background:var(--bg-subtle);"></div>
+        <div class="row">
+          <div class="field"><label>持股数</label>
+            <input id="edit-qty" name="quantity" type="number" step="0.001" required
+                   oninput="const ac=document.getElementById('edit-avg-cost'); if(ac.value) document.getElementById('edit-cost').value = (ac.value * this.value || 0).toFixed(2)"></div>
+          <div class="field"><label>当前价</label><input id="edit-price" name="last_price" type="number" step="0.01"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>每股成本 <span class="hint">Robinhood 显示这个</span></label>
+            <input id="edit-avg-cost" type="number" step="0.01"
+                   oninput="document.getElementById('edit-cost').value = (this.value * document.getElementById('edit-qty').value || 0).toFixed(2)"></div>
+          <div class="field"><label>总成本 <span class="hint">自动算或手填</span></label>
+            <input id="edit-cost" name="cost_basis_total" type="number" step="0.01"></div>
+        </div>
+        <div class="field">
+          <label>Broker / 平台</label>
+          <select id="edit-broker" name="broker">
+            <option value="Fidelity">Fidelity</option>
+            <option value="Robinhood">Robinhood</option>
+            <option value="Schwab">Schwab</option>
+            <option value="E-Trade">E-Trade</option>
+            <option value="Vanguard">Vanguard</option>
+            <option value="Interactive Brokers">Interactive Brokers</option>
+            <option value="Merrill Lynch">Merrill Lynch</option>
+            <option value="TD Ameritrade">TD Ameritrade</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+          <button type="button" class="secondary" onclick="closeModal('edit-modal')">取消</button>
+          <button type="submit">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function toggleRunMode(mode) {
+    document.getElementById('run-tickers-field').style.display = mode === 'tickers' ? '' : 'none';
+    document.getElementById('run-sector-field').style.display = mode === 'sector' ? '' : 'none';
+}
+
+// Token-aware autocomplete for the multi-ticker input.
+// Splits on the same separator the server uses, completes only the
+// last token, and inserts " " after pick so the user keeps typing.
+(function() {
+    const KNOWN = {{ ticker_json|safe }};
+    const input = document.getElementById('run-tickers-input');
+    const box = document.getElementById('run-tickers-suggest');
+    if (!input || !box) return;
+    let activeIdx = -1;
+    let matches = [];
+
+    function lastToken(value, caret) {
+        const before = value.slice(0, caret);
+        const m = before.match(/[^\s,，、;]*$/);
+        return m ? m[0] : '';
+    }
+
+    function render() {
+        while (box.firstChild) box.removeChild(box.firstChild);
+        if (matches.length === 0) { box.style.display = 'none'; return; }
+        matches.forEach((t, i) => {
+            const row = document.createElement('div');
+            row.dataset.idx = String(i);
+            row.style.cssText = 'padding:6px 12px;cursor:pointer;' + (i === activeIdx ? 'background:var(--bg-subtle);' : '');
+            const sym = document.createElement('strong');
+            sym.textContent = t.s;
+            row.appendChild(sym);
+            if (t.n) {
+                const nm = document.createElement('span');
+                nm.style.cssText = 'color:var(--fg-muted);font-size:12px;margin-left:8px;';
+                nm.textContent = t.n;
+                row.appendChild(nm);
+            }
+            box.appendChild(row);
+        });
+        box.style.display = 'block';
+    }
+
+    function pick(idx) {
+        if (idx < 0 || idx >= matches.length) return;
+        const caret = input.selectionStart;
+        const value = input.value;
+        const before = value.slice(0, caret);
+        const after = value.slice(caret);
+        const newBefore = before.replace(/[^\s,，、;]*$/, matches[idx].s + ' ');
+        input.value = newBefore + after;
+        const newCaret = newBefore.length;
+        input.setSelectionRange(newCaret, newCaret);
+        matches = []; activeIdx = -1; render();
+        input.focus();
+    }
+
+    input.addEventListener('input', () => {
+        const tok = lastToken(input.value, input.selectionStart).toUpperCase();
+        if (!tok) { matches = []; render(); return; }
+        matches = KNOWN.filter(t => t.s.startsWith(tok) || (t.n && t.n.toUpperCase().includes(tok))).slice(0, 8);
+        activeIdx = matches.length ? 0 : -1;
+        render();
+    });
+
+    input.addEventListener('keydown', (e) => {
+        if (box.style.display === 'none') return;
+        if (e.key === 'ArrowDown') { e.preventDefault(); activeIdx = Math.min(activeIdx + 1, matches.length - 1); render(); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); activeIdx = Math.max(activeIdx - 1, 0); render(); }
+        else if (e.key === 'Enter' && activeIdx >= 0) { e.preventDefault(); pick(activeIdx); }
+        else if (e.key === 'Escape') { matches = []; render(); }
+    });
+
+    box.addEventListener('mousedown', (e) => {
+        const target = e.target.closest('[data-idx]');
+        if (!target) return;
+        e.preventDefault();
+        pick(parseInt(target.dataset.idx, 10));
+    });
+
+    input.addEventListener('blur', () => { setTimeout(() => { matches = []; render(); }, 150); });
+})();
+</script>
+<script>{{ extra_js|safe }}</script>
+{% endblock %}
