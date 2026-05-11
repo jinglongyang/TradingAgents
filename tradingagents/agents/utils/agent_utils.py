@@ -23,6 +23,17 @@ from tradingagents.agents.utils.news_data_tools import (
 )
 
 
+NEUTRAL_LANGUAGE_DISCIPLINE = (
+    "\n\nLanguage discipline (keep responses through enterprise content filters):"
+    " Use sober, analyst-note phrasing. Substitute 'bankruptcy/collapse/crisis' with"
+    " 'financial weakness/capital constraints/liquidity pressure'; 'crash/death spiral'"
+    " with 'extended drawdown'; 'burning cash/hemorrhaging' with 'negative free cash flow';"
+    " 'doomed/fatal' with 'structural challenges'; 'destroy/wipe out' with"
+    " 'compress/impair'. Flag every real risk — do not soften conclusions — but use"
+    " neutral, professional vocabulary."
+)
+
+
 def get_language_instruction() -> str:
     """Return a prompt instruction for the configured output language.
 

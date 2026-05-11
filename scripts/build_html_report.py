@@ -338,6 +338,79 @@ def build_index(out_dir: Path, plan_csv: Path, summary_csvs: list[Path]) -> None
         for r in rating_order if ratings.get(r, 0)
     )
 
+    rating_glossary = """
+<h2>评级体系说明</h2>
+<p style="color: var(--color-fg-muted); font-size: 14px;">
+PM 用的是华尔街标准的 5 档评级 — 从看多到看空：
+</p>
+<table>
+<thead>
+<tr><th>评级</th><th>中文</th><th>含义</th><th>建议动作</th></tr>
+</thead>
+<tbody>
+<tr class="action-add">
+  <td><span class="rating rating-buy">Buy</span></td>
+  <td><strong>买入</strong></td>
+  <td>强烈看多。基本面 + 趋势 + 估值都支持，建议大幅增加仓位。</td>
+  <td>分批加仓 / 新开仓</td>
+</tr>
+<tr class="action-add">
+  <td><span class="rating rating-overweight">Overweight</span></td>
+  <td><strong>超配</strong></td>
+  <td>看多但克制。该股在你组合里应该<strong>比基准（如 SPY 指数）更重</strong>，但当前估值/拥挤度不支持激进追价。</td>
+  <td>已有仓位继续持有 + 回调时小幅加仓</td>
+</tr>
+<tr>
+  <td><span class="rating rating-hold">Hold</span></td>
+  <td>持有</td>
+  <td>中性。基本面 OK 但当前不是好的进场点（可能估值偏热、技术面拉伸）。</td>
+  <td>已持有不动；新资金等待更好时点</td>
+</tr>
+<tr class="action-reduce">
+  <td><span class="rating rating-underweight">Underweight</span></td>
+  <td><strong>低配</strong></td>
+  <td>看空但不致清仓。该股在你组合里应该<strong>比基准更轻</strong>，建议部分减仓但保留少量观察仓。</td>
+  <td>分批减仓 20-35% / 在反弹时卖</td>
+</tr>
+<tr class="action-reduce">
+  <td><span class="rating rating-sell">Sell</span></td>
+  <td><strong>卖出</strong></td>
+  <td>强烈看空。基本面恶化或重大风险显现，建议全部清仓。</td>
+  <td>清仓 100%（应税账户优先做 TLH 收割损失）</td>
+</tr>
+</tbody>
+</table>
+
+<h3>关键区分</h3>
+<ul>
+  <li><strong>Buy vs Overweight</strong>：买入强度。Overweight 是"温和看好"，Buy 是"强烈看好"。</li>
+  <li><strong>Sell vs Underweight</strong>：卖出强度。Underweight 是"减仓但留点"，Sell 是"全清"。</li>
+  <li><strong>"基准权重"</strong>：可理解为该股在大盘指数（如 S&amp;P 500）里的权重。NVDA 在 S&amp;P 500 占 ~6%；如果你的组合占 1.7% → PM 给 Overweight 意味"应该加到 >6% 基准以上"。</li>
+</ul>
+
+<h3>价格字段含义</h3>
+<table>
+<thead>
+<tr><th>字段</th><th>含义</th><th>何时关键</th></tr>
+</thead>
+<tbody>
+<tr><td><strong>Price Target (12m)</strong></td><td>12 个月目标价。Buy/Overweight 时为<strong>上涨目标</strong>；Underweight/Sell 时为<strong>公允价值锚点</strong>（触发重评的价位）。</td><td>判断现价 vs 目标</td></tr>
+<tr><td><strong>Entry/Exit Zone</strong></td><td>具体执行价格区间。Buy 时"在 $X-Y 回调买入"；Sell 时"在 $X-Y 反弹卖出"。</td><td>下单时</td></tr>
+<tr><td><strong>Stop Loss</strong></td><td>看多评级下的止损位。跌破此价位意味着 thesis 失效，应立即减仓或离场。</td><td>风控</td></tr>
+<tr><td><strong>Time Horizon</strong></td><td>建议持有期（如 3-6 个月 / 6-12 个月）。短 = 战术性交易；长 = 战略性配置。</td><td>仓位类型</td></tr>
+</tbody>
+</table>
+
+<h3>账户类型说明</h3>
+<p>同一评级在不同账户类型上的具体动作可能不同，原因是<strong>税务效率</strong>：</p>
+<ul>
+  <li><span class="tag tag-roth">Roth</span> — 税后免税增长，<strong>最珍贵席位</strong>。卖出无税但席位有限，应留给最高确信度长期复利资产。</li>
+  <li><span class="tag tag-taxdeferred">TaxDeferred</span> — 401(k)/IRA 等，<strong>调仓零税成本</strong>。再平衡的主战场。</li>
+  <li><span class="tag tag-taxable">Taxable</span> — 应税账户。盈利卖出触发资本利得税（短期 32-37%, 长期 15-23.8%）；亏损卖出可做 tax-loss harvesting 抵扣。</li>
+  <li><span class="tag tag-childedu">ChildEdu</span> — 529/儿童账户。法规限制 + 长期视野，少调仓。</li>
+</ul>
+"""
+
     body = f"""
 <h1>Portfolio Review</h1>
 <p style="color: var(--color-fg-muted); margin-top: -16px; font-size: 15px;">
@@ -367,8 +440,9 @@ def build_index(out_dir: Path, plan_csv: Path, summary_csvs: list[Path]) -> None
   </div>
 </div>
 
-<h2>34 只标的评级分布</h2>
+<h2>标的评级分布</h2>
 <p>{rating_chips}</p>
+{rating_glossary}
 
 <h2>开始的地方</h2>
 <ul>
