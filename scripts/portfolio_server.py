@@ -109,6 +109,9 @@ function openSell(sym, acctId, acctName, qty) {
     document.getElementById('sell-qty').max = qty;
     document.getElementById('sell-qty').value = qty;
     document.getElementById('sell-title').textContent = `Sell ${sym} from ${acctName}`;
+    const anchor = 'acct-' + acctId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const inp = document.querySelector('#sell-modal input[name="redirect_anchor"]');
+    if (inp) inp.value = anchor;
     openModal('sell-modal');
 }
 function openAccountEdit(acctId, acctName, currentBroker, currentType, currentOwner) {
@@ -119,6 +122,7 @@ function openAccountEdit(acctId, acctName, currentBroker, currentType, currentOw
     document.getElementById('acct-edit-owner-input').value = currentOwner || 'Self';
     document.getElementById('acct-edit-title').textContent = `编辑账户: ${acctName}`;
     document.getElementById('acct-delete-id').value = acctId;
+    document.getElementById('acct-edit-anchor').value = 'acct-' + acctId.replace(/[^a-zA-Z0-9_-]/g, '_');
     openModal('acct-edit-modal');
 }
 function deleteRow(snapshotId, symbol) {
@@ -147,6 +151,26 @@ function openAddToAccount(acctId, acctName, broker, accType, owner) {
     document.querySelector('#add-modal input[name="symbol"]').focus();
     openModal('add-modal');
 }
+function currentAnchor(snapshotId) {
+    // Walk up to the surrounding .account div and return its anchor id
+    const row = document.querySelector(`tr button[onclick*="${snapshotId}"]`);
+    if (!row) return '';
+    const acctDiv = row.closest('.account')?.previousElementSibling
+                  || row.closest('.account')?.querySelector('[id^="acct-"]');
+    // fallback: find any [id^="acct-"] preceding the row
+    let el = row.closest('tr');
+    while (el) {
+        let prev = el.previousElementSibling;
+        while (prev) {
+            if (prev.id && prev.id.startsWith('acct-')) return prev.id;
+            const inner = prev.querySelector?.('[id^="acct-"]');
+            if (inner) return inner.id;
+            prev = prev.previousElementSibling;
+        }
+        el = el.parentElement;
+    }
+    return '';
+}
 function openEdit(snapshotId, sym, qty, price, cost, broker) {
     document.getElementById('edit-snapshot-id').value = snapshotId;
     document.getElementById('edit-symbol').value = sym;
@@ -155,6 +179,8 @@ function openEdit(snapshotId, sym, qty, price, cost, broker) {
     document.getElementById('edit-cost').value = cost;
     document.getElementById('edit-broker').value = broker || 'Fidelity';
     document.getElementById('edit-title').textContent = `Edit ${sym}`;
+    const anchorInp = document.querySelector('#edit-modal input[name="redirect_anchor"]');
+    if (anchorInp) anchorInp.value = currentAnchor(snapshotId);
     openModal('edit-modal');
 }
 """
@@ -346,6 +372,7 @@ def _render(message: str = ""):
   <div class="modal">
     <h3 id="sell-title">Sell</h3>
     <form method="post" action="/sell">
+      <input type="hidden" name="redirect_anchor" value="">
       <input type="hidden" id="sell-symbol" name="symbol">
       <input type="hidden" id="sell-account-id" name="account_id">
       <input type="hidden" id="sell-account-name" name="account_name">
@@ -414,6 +441,7 @@ function toggleRunMode(mode) {{
     <h3 id="acct-edit-title">编辑账户</h3>
     <p style="color:var(--fg-muted);font-size:13px;">修改会应用到本账户的所有持仓行（按 account_id 匹配）</p>
     <form method="post" action="/account-edit">
+      <input type="hidden" name="redirect_anchor" id="acct-edit-anchor" value="">
       <input type="hidden" id="acct-edit-id" name="account_id">
       <div class="field">
         <label>账户名 <span class="hint">如 "Merrill CMA" / "Robinhood 个人户"</span></label>
@@ -471,6 +499,7 @@ function toggleRunMode(mode) {{
   <div class="modal">
     <h3 id="edit-title">Edit</h3>
     <form method="post" action="/edit">
+      <input type="hidden" name="redirect_anchor" value="">
       <input type="hidden" id="edit-snapshot-id" name="snapshot_id">
       <div class="field"><label>Ticker <span class="hint">readonly</span></label><input id="edit-symbol" readonly style="background:var(--bg-subtle);"></div>
       <div class="row">
@@ -537,9 +566,10 @@ def add(
                 "UPDATE positions_snapshot SET owner = ? WHERE account_id = ? AND owner IS NULL",
                 (owner.strip(), account_id.strip()),
             )
-        # PRG pattern: redirect to anchor so browser scrolls back to that account section
-        if redirect_anchor:
-            return RedirectResponse(url=f"/#{redirect_anchor}", status_code=303)
+        # PRG pattern: always redirect (anchor if provided) so the browser keeps
+        # its position instead of jumping to the top on a re-render.
+        anchor = redirect_anchor or ("acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", account_id.strip()))
+        return RedirectResponse(url=f"/#{anchor}", status_code=303)
         msg = f'<div class="msg success">✓ 已添加 <strong>{symbol.upper()}</strong> 到 {account_name}</div>'
     except Exception as e:  # noqa: BLE001
         msg = f'<div class="msg error">✗ 错误: {e}</div>'
@@ -578,13 +608,14 @@ def account_delete(account_id: str = Form(...)):
     return _render(message=msg)
 
 
-@app.post("/account-edit", response_class=HTMLResponse)
+@app.post("/account-edit")
 def account_edit(
     account_id: str = Form(...),
     account_name: str = Form(...),
     account_type: str = Form(...),
     broker: str = Form(...),
     owner: str = Form(...),
+    redirect_anchor: str = Form(""),
 ):
     """Update account_name, account_type, broker, owner on every row of this account."""
     try:
@@ -598,22 +629,20 @@ def account_edit(
                 (account_name.strip(), account_type, broker, owner.strip(), account_id),
             )
             n = cur.rowcount
-        msg = (
-            f'<div class="msg success">✓ 已更新 <strong>{n}</strong> 行 '
-            f'(name=<strong>{account_name}</strong>, owner={owner}, type={account_type}, broker={broker})</div>'
-        )
+        anchor = redirect_anchor or ("acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", account_id))
+        return RedirectResponse(url=f"/#{anchor}", status_code=303)
     except Exception as e:  # noqa: BLE001
-        msg = f'<div class="msg error">✗ 错误: {e}</div>'
-    return _render(message=msg)
+        return _render(message=f'<div class="msg error">✗ 错误: {e}</div>')
 
 
-@app.post("/edit", response_class=HTMLResponse)
+@app.post("/edit")
 def edit(
     snapshot_id: int = Form(...),
     quantity: float = Form(...),
     last_price: Optional[float] = Form(None),
     cost_basis_total: Optional[float] = Form(None),
     broker: Optional[str] = Form(None),
+    redirect_anchor: str = Form(""),
 ):
     try:
         price = last_price or 0.0
@@ -630,15 +659,14 @@ def edit(
                 (quantity, price, price * quantity if price else cost,
                  cost, cost / quantity if quantity else 0.0, broker, snapshot_id),
             )
-            row = conn.execute("SELECT symbol FROM positions_snapshot WHERE snapshot_id = ?", (snapshot_id,)).fetchone()
-        sym = row["symbol"] if row else "?"
-        msg = f'<div class="msg success">✓ 已更新 <strong>{sym}</strong></div>'
+            row = conn.execute("SELECT account_id FROM positions_snapshot WHERE snapshot_id = ?", (snapshot_id,)).fetchone()
+        anchor = redirect_anchor or (("acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", row["account_id"])) if row else "")
+        return RedirectResponse(url=f"/#{anchor}" if anchor else "/", status_code=303)
     except Exception as e:  # noqa: BLE001
-        msg = f'<div class="msg error">✗ 错误: {e}</div>'
-    return _render(message=msg)
+        return _render(message=f'<div class="msg error">✗ 错误: {e}</div>')
 
 
-@app.post("/sell", response_class=HTMLResponse)
+@app.post("/sell")
 def sell(
     symbol: str = Form(...),
     account_id: str = Form(...),
@@ -646,6 +674,7 @@ def sell(
     shares: float = Form(...),
     price: float = Form(...),
     note: Optional[str] = Form(None),
+    redirect_anchor: str = Form(""),
 ):
     try:
         # Record execution
@@ -682,11 +711,10 @@ def sell(
                         (new_qty, new_value, price, row["snapshot_id"]),
                     )
 
-        proceeds = shares * price
-        msg = f'<div class="msg success">✓ 卖出 {shares} 股 <strong>{symbol}</strong> @ ${price:.2f} = ${proceeds:,.0f}（已记 executions）</div>'
+        anchor = redirect_anchor or ("acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", account_id))
+        return RedirectResponse(url=f"/#{anchor}", status_code=303)
     except Exception as e:  # noqa: BLE001
-        msg = f'<div class="msg error">✗ 错误: {e}</div>'
-    return _render(message=msg)
+        return _render(message=f'<div class="msg error">✗ 错误: {e}</div>')
 
 
 @app.get("/lookup", response_class=HTMLResponse)
