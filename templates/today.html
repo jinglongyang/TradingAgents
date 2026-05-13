@@ -15,6 +15,33 @@
     {% endif %}
   </p>
 
+  {% if trade_date and risk %}
+  <div class="status" style="background:var(--bg-subtle);padding:10px 14px;border-radius:8px;border:1px solid var(--border);margin-bottom:10px;">
+    <div style="display:flex;gap:28px;align-items:center;flex-wrap:wrap;font-size:12px;">
+      <div>
+        <span style="color:var(--fg-muted);">组合规模</span>
+        <span style="font-weight:600;margin-left:6px;">${{ "{:,.0f}".format(risk.portfolio_total) }}</span>
+      </div>
+      <div title="按当前 $ 持仓加权的 β。覆盖率 = 有 β 数据的 ticker 占组合的比例。">
+        <span style="color:var(--fg-muted);">Portfolio β</span>
+        <span style="font-weight:600;margin-left:6px;{% if risk.portfolio_beta and risk.portfolio_beta > 1.2 %}color:var(--loss);{% elif risk.portfolio_beta and risk.portfolio_beta < 0.9 %}color:var(--gain);{% endif %}">
+          {% if risk.portfolio_beta is not none %}{{ "%.2f"|format(risk.portfolio_beta) }}{% else %}—{% endif %}
+        </span>
+        <span style="color:var(--fg-muted);font-size:11px;margin-left:4px;">({{ "%.0f"|format(risk.beta_coverage_pct) }}% 覆盖)</span>
+      </div>
+      <div title="{{ risk.top5_tickers }}">
+        <span style="color:var(--fg-muted);">Top-5 集中度</span>
+        <span style="font-weight:600;margin-left:6px;{% if risk.top5_pct > 60 %}color:var(--loss);{% endif %}">{{ "%.0f"|format(risk.top5_pct) }}%</span>
+      </div>
+      <div>
+        <span style="color:var(--fg-muted);">Cash</span>
+        <span style="font-weight:600;margin-left:6px;">${{ "{:,.0f}".format(risk.cash_total) }}</span>
+        <span style="color:var(--fg-muted);font-size:11px;margin-left:4px;">({{ "%.1f"|format(risk.cash_pct) }}%)</span>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
   {% if trade_date %}
   <div class="status" style="background:var(--bg-subtle);padding:14px;border-radius:8px;border:1px solid var(--border);margin-bottom:16px;">
     <div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap;">
@@ -43,7 +70,14 @@
     <a class="btn secondary" href="/">← 回到持仓</a>
     <a class="btn secondary" href="/targets">🎯 目标权重</a>
     <a class="btn secondary" href="/decisions">📋 评级总览</a>
+    <a class="btn secondary" href="/alerts">🚨 止损告警</a>
+    <a class="btn secondary" href="/backtest">📊 回测</a>
+    <a class="btn secondary" href="/tech">📈 技术面</a>
+    <a class="btn secondary" href="/correlation">🔗 相关性</a>
     <a class="btn secondary" href="/executions">📒 交易记录</a>
+    <form method="post" action="/refresh-earnings" style="display:inline;margin:0;">
+      <button class="btn secondary" type="submit" title="后台抓取 yfinance earnings date">📅 刷新财报日</button>
+    </form>
   </div>
 
   {% for acct in accounts %}
@@ -99,7 +133,11 @@
               {% else %}<span style="background:var(--loss);color:white;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600;">先减</span>{% endif %}
             </td>
             <td><a href="/decisions/{{ i.ticker }}" style="font-weight:600;color:var(--loss);">{{ i.ticker }}</a>
-                <span class="tag tag-{{ i.rating|lower }}" style="padding:1px 5px;font-size:10px;margin-left:4px;">{{ i.rating }}</span></td>
+                <span class="tag tag-{{ i.rating|lower }}" style="padding:1px 5px;font-size:10px;margin-left:4px;">{{ i.rating }}</span>
+                {% if i.earnings_in_days is not none and i.earnings_in_days >= 0 and i.earnings_in_days <= 7 %}
+                  <span title="财报日 {{ i.earnings_date }}" style="background:{% if i.earnings_in_days <= 2 %}var(--loss){% else %}#f59e0b{% endif %};color:white;padding:1px 5px;border-radius:3px;font-size:10px;margin-left:4px;">📅 财报 {% if i.earnings_in_days == 0 %}今日{% else %}+{{ i.earnings_in_days }}d{% endif %}</span>
+                {% endif %}
+            </td>
             <td><strong style="color:var(--loss);">{{ i.action }}</strong></td>
             <td class="num">{% if i.size_pct is not none %}{{ "%.0f"|format(i.size_pct) }}%{% else %}—{% endif %}</td>
             <td class="num">
@@ -137,7 +175,11 @@
               {% else %}<span style="background:{{ badge_bg }};color:white;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600;">{{ badge_text }}</span>{% endif %}
             </td>
             <td><a href="/decisions/{{ i.ticker }}" style="font-weight:600;color:var(--gain);">{{ i.ticker }}</a>
-                <span class="tag tag-{{ i.rating|lower }}" style="padding:1px 5px;font-size:10px;margin-left:4px;">{{ i.rating }}</span></td>
+                <span class="tag tag-{{ i.rating|lower }}" style="padding:1px 5px;font-size:10px;margin-left:4px;">{{ i.rating }}</span>
+                {% if i.earnings_in_days is not none and i.earnings_in_days >= 0 and i.earnings_in_days <= 7 %}
+                  <span title="财报日 {{ i.earnings_date }}" style="background:{% if i.earnings_in_days <= 2 %}var(--loss){% else %}#f59e0b{% endif %};color:white;padding:1px 5px;border-radius:3px;font-size:10px;margin-left:4px;">📅 财报 {% if i.earnings_in_days == 0 %}今日{% else %}+{{ i.earnings_in_days }}d{% endif %}</span>
+                {% endif %}
+            </td>
             <td><strong style="color:var(--gain);">{{ i.action }}</strong></td>
             <td class="num">{% if i.size_pct is not none %}{{ "%.0f"|format(i.size_pct) }}%{% else %}—{% endif %}</td>
             <td class="num">

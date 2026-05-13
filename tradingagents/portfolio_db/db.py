@@ -152,6 +152,8 @@ def init_db(db_path: Path | None = None) -> Path:
             ("industry", "TEXT"),
             ("market_cap", "REAL"),
             ("beta", "REAL"),
+            ("earnings_date", "TEXT"),
+            ("earnings_updated_at", "TEXT"),
         ]:
             if col_name not in ticker_cols:
                 conn.execute(f"ALTER TABLE tickers ADD COLUMN {col_name} {col_type}")
@@ -184,6 +186,19 @@ def init_db(db_path: Path | None = None) -> Path:
             CREATE TABLE IF NOT EXISTS account_cash (
                 account_id   TEXT PRIMARY KEY,
                 cash         REAL NOT NULL DEFAULT 0,
+                updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+
+        # Per-account user-defined display alias (e.g. the exact name shown on
+        # Fidelity). Optional — when unset, UI falls back to account_name.
+        # Survives CSV re-imports because it's keyed by account_id only.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS accounts (
+                account_id   TEXT PRIMARY KEY,
+                alias        TEXT,
                 updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
             )
             """

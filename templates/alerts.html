@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}止损/目标价告警 — Portfolio Manager{% endblock %}
+
+{% block content %}
+  <h1>🚨 止损 / 目标价告警</h1>
+  <p class="subtitle">
+    最新 PM 给出的 stop_loss 和 price_target，对比当前价格。共 {{ total }} 个 ticker 有止损或目标价。
+  </p>
+
+  <div class="status" style="margin-bottom:14px;">
+    {% if counts.stop_breached %}
+      <span class="tag" style="background:var(--loss);color:white;padding:4px 10px;font-size:12px;margin-right:6px;">
+        🛑 跌破止损: {{ counts.stop_breached }}
+      </span>
+    {% endif %}
+    {% if counts.target_hit %}
+      <span class="tag" style="background:var(--gain);color:white;padding:4px 10px;font-size:12px;margin-right:6px;">
+        🎯 触及目标: {{ counts.target_hit }}
+      </span>
+    {% endif %}
+    {% if counts.stop_warn %}
+      <span class="tag" style="background:#f59e0b;color:white;padding:4px 10px;font-size:12px;margin-right:6px;">
+        ⚠️ 接近止损 (<5%): {{ counts.stop_warn }}
+      </span>
+    {% endif %}
+    {% if counts.ok %}
+      <span class="tag" style="background:var(--bg);border:1px solid var(--border);color:var(--fg-muted);padding:4px 10px;font-size:12px;">
+        ✓ 正常: {{ counts.ok }}
+      </span>
+    {% endif %}
+  </div>
+
+  <div style="margin-bottom:16px;">
+    <a class="btn secondary" href="/">← 回到持仓</a>
+    <a class="btn secondary" href="/today">🎯 今日执行</a>
+    <a class="btn secondary" href="/decisions">📋 评级总览</a>
+    <form method="post" action="/update-prices" style="display:inline;margin:0;">
+      <button class="btn secondary" type="submit">🔄 刷新价格</button>
+    </form>
+  </div>
+
+  {% if not items %}
+    <p style="color:var(--fg-muted);">没有带 stop_loss / price_target 的决策。可能 PM 在 final_decision 里没明确给出。</p>
+  {% else %}
+  <table style="background:var(--bg-subtle);border-radius:8px;border:1px solid var(--border);overflow:hidden;">
+    <thead>
+      <tr>
+        <th>状态</th>
+        <th>Ticker</th>
+        <th>评级</th>
+        <th class="num">当前价</th>
+        <th class="num">止损</th>
+        <th class="num">Δ 止损</th>
+        <th class="num">目标价</th>
+        <th class="num">Δ 目标</th>
+        <th>决策日期</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for it in items %}
+      <tr style="{% if it.status == 'stop_breached' %}background:rgba(239,68,68,0.08);{% elif it.status == 'target_hit' %}background:rgba(16,185,129,0.08);{% elif it.status == 'stop_warn' %}background:rgba(245,158,11,0.08);{% endif %}">
+        <td>{{ it.status_label }}</td>
+        <td><strong>{{ it.symbol }}</strong></td>
+        <td><span class="tag tag-{{ it.rating|lower }}" style="padding:3px 8px;font-size:11px;">{{ it.rating }}</span></td>
+        <td class="num">${{ "%.2f"|format(it.price) }}</td>
+        <td class="num">{% if it.stop_loss %}${{ "%.2f"|format(it.stop_loss) }}{% else %}—{% endif %}</td>
+        <td class="num" style="{% if it.dist_to_stop_pct is not none and it.dist_to_stop_pct < 0 %}color:var(--loss);font-weight:600;{% elif it.dist_to_stop_pct is not none and it.dist_to_stop_pct < 5 %}color:#f59e0b;{% endif %}">
+          {% if it.dist_to_stop_pct is not none %}{{ "%+.1f"|format(it.dist_to_stop_pct) }}%{% else %}—{% endif %}
+        </td>
+        <td class="num">{% if it.price_target %}${{ "%.2f"|format(it.price_target) }}{% else %}—{% endif %}</td>
+        <td class="num" style="{% if it.dist_to_target_pct is not none and it.dist_to_target_pct < 0 %}color:var(--gain);font-weight:600;{% endif %}">
+          {% if it.dist_to_target_pct is not none %}{{ "%+.1f"|format(it.dist_to_target_pct) }}%{% else %}—{% endif %}
+        </td>
+        <td style="font-size:12px;color:var(--fg-muted);">{{ it.trade_date }}</td>
+        <td><a href="/decisions/{{ it.symbol }}" class="btn small secondary">详情</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+{% endblock %}

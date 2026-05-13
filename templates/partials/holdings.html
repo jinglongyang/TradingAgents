@@ -7,9 +7,9 @@
       <div class="account-header">
         <div>
           <button class="small secondary"
-                  onclick="openAccountEdit('{{ a.account_id }}', `{{ a.account_name }}`, '{{ a.broker }}', '{{ a.account_type }}', '{{ a.owner }}')"
+                  onclick="openAccountEdit('{{ a.account_id }}', `{{ a.account_name }}`, '{{ a.broker }}', '{{ a.account_type }}', '{{ a.owner }}', `{{ a.alias }}`)"
                   style="margin-right:8px;padding:2px 8px;font-size:11px;">✎ 编辑账户</button>
-          <span class="account-name">{{ a.account_name }}</span>
+          <span class="account-name">{{ a.display_name }}</span>
           <span class="tag tag-{{ a.account_type_lower }}">{{ a.account_type }}</span>
           <span class="tag" style="margin-left:4px;font-size:10px;background:var(--bg);border:1px solid var(--border);">🏦 {{ a.broker }}</span>
           <span class="tag" style="margin-left:4px;font-size:10px;background:var(--bg);border:1px solid var(--border);">👤 {{ a.owner }}</span>

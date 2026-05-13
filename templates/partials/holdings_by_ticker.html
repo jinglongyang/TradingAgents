@@ -42,7 +42,7 @@
                 {% for a in t.accounts %}
                 <tr>
                   <td style="font-size:12px;">
-                    {{ a.account_name }}
+                    {{ a.display_name }}
                     <span style="color:var(--fg-muted);font-size:10px;">· 🏦 {{ a.broker }} · 👤 {{ a.owner }}</span>
                   </td>
                   <td><span class="tag tag-{{ a.account_type_lower }}">{{ a.account_type }}</span></td>

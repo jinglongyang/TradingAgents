@@ -138,13 +138,14 @@ function openSell(sym, acctId, acctName, qty) {
     if (inp) inp.value = anchor;
     openModal('sell-modal');
 }
-function openAccountEdit(acctId, acctName, currentBroker, currentType, currentOwner) {
+function openAccountEdit(acctId, acctName, currentBroker, currentType, currentOwner, currentAlias) {
     document.getElementById('acct-edit-id').value = acctId;
     document.getElementById('acct-edit-name-input').value = acctName;
+    document.getElementById('acct-edit-alias-input').value = currentAlias || '';
     document.getElementById('acct-edit-broker-select').value = currentBroker || 'Fidelity';
     document.getElementById('acct-edit-type-select').value = currentType || 'Taxable';
     document.getElementById('acct-edit-owner-input').value = currentOwner || 'Self';
-    document.getElementById('acct-edit-title').textContent = `编辑账户: ${acctName}`;
+    document.getElementById('acct-edit-title').textContent = `编辑账户: ${currentAlias || acctName}`;
     document.getElementById('acct-delete-id').value = acctId;
     document.getElementById('acct-edit-anchor').value = 'acct-' + acctId.replace(/[^a-zA-Z0-9_-]/g, '_');
     openModal('acct-edit-modal');
@@ -221,9 +222,11 @@ def _load_holdings_rows() -> list[dict]:
             """
             SELECT p.*,
                    COALESCE(t.last_price, p.last_price) AS authoritative_price,
-                   COALESCE(t.last_price, p.last_price) * p.quantity AS authoritative_value
+                   COALESCE(t.last_price, p.last_price) * p.quantity AS authoritative_value,
+                   a.alias AS alias
             FROM positions_snapshot p
             LEFT JOIN tickers t ON t.symbol = p.symbol
+            LEFT JOIN accounts a ON a.account_id = p.account_id
             WHERE p.import_date = ?
             ORDER BY p.symbol, p.account_name
             """,
@@ -260,10 +263,13 @@ def _build_tickers_view():
         for r in sorted(items, key=lambda x: -x["current_value"]):
             cost = r["cost_basis_total"] or 0
             apl = (r["current_value"] - cost) / cost * 100 if cost else 0
+            alias = (r.get("alias") or "").strip()
             accounts.append({
                 "snapshot_id": r["snapshot_id"],
                 "account_id": r["account_id"],
                 "account_name": r["account_name"],
+                "alias": alias,
+                "display_name": alias or r["account_name"],
                 "account_type": r["account_type"],
                 "account_type_lower": (r["account_type"] or "").lower(),
                 "broker": r["broker"] or "—",
@@ -322,9 +328,12 @@ def _build_holdings_view():
                 "pl_class": "gain" if pl_pct >= 0 else "loss",
                 "broker": r["broker"] or "Fidelity",
             })
+        alias = (items[0].get("alias") or "").strip()
         accounts.append({
             "account_id": aid,
             "account_name": aname,
+            "alias": alias,
+            "display_name": alias or aname,
             "account_type": atype,
             "account_type_lower": atype.lower(),
             "broker": items[0]["broker"] or "—",
@@ -432,7 +441,7 @@ def add(
                 from datetime import datetime as _dt
                 hist = _yf.Ticker(symbol_clean).history(period="5d")
                 if len(hist) > 0:
-                    price = float(hist["Close"].iloc[-1])
+                    price = round(float(hist["Close"].iloc[-1]), 3)
                     # Upsert canonical price into tickers
                     with connect() as conn:
                         conn.execute(
@@ -508,17 +517,95 @@ _enrich_state: dict = {"running": False, "started_at": None, "total": 0, "done":
 _enrich_lock = threading.Lock()
 
 
+def _fetch_next_earnings(t) -> str | None:
+    """Pull the next upcoming earnings date as ISO 'YYYY-MM-DD' from yfinance.
+
+    yfinance exposes two surfaces: ``Ticker.calendar`` (dict, values are
+    ``datetime.date`` objects) and ``Ticker.earnings_dates`` (DataFrame
+    indexed by ``pd.Timestamp``). Probe both and pick the soonest future date.
+    Returns None if neither has usable data."""
+    from datetime import date as _date, datetime as _dt
+
+    candidates: list[_date] = []
+    today = _date.today()
+
+    def _to_date(x):
+        if isinstance(x, _dt):
+            return x.date()
+        if isinstance(x, _date):
+            return x
+        if hasattr(x, "to_pydatetime"):
+            try:
+                return x.to_pydatetime().date()
+            except Exception:
+                return None
+        return None
+
+    try:
+        cal = t.calendar
+        if isinstance(cal, dict):
+            for k in ("Earnings Date", "earnings_date", "earningsDate"):
+                v = cal.get(k)
+                if not v:
+                    continue
+                for x in (v if isinstance(v, (list, tuple)) else [v]):
+                    d = _to_date(x)
+                    if d and d >= today:
+                        candidates.append(d)
+    except Exception:
+        pass
+
+    try:
+        ed = t.earnings_dates
+        if ed is not None and not ed.empty:
+            for ts in ed.index:
+                d = _to_date(ts)
+                if d and d >= today:
+                    candidates.append(d)
+    except Exception:
+        pass
+
+    return min(candidates).isoformat() if candidates else None
+
+
 def _enrich_worker(targets: list[str]) -> None:
     """Background worker: pulls metadata for the given tickers one by one.
 
     Each ticker commits independently so a kill/crash mid-batch keeps the
     partial progress; the next /enrich-tickers re-scans for remaining NULLs.
+
+    yfinance's .info omits beta for ETFs and some micro-caps. When that
+    happens, fall back to a 6-month linear regression of the ticker's daily
+    returns against SPY so portfolio-level β coverage stays high.
     """
     import yfinance as _yf
+    import numpy as _np
+    spy_ret = None
     try:
+        try:
+            spy_hist = _yf.Ticker("SPY").history(period="6mo", auto_adjust=True)["Close"]
+            spy_ret = spy_hist.pct_change().dropna()
+        except Exception:
+            spy_ret = None
+
         for sym in targets:
             try:
-                info = _yf.Ticker(sym).info
+                t = _yf.Ticker(sym)
+                info = t.info
+                beta = info.get("beta")
+                if beta is None and spy_ret is not None:
+                    try:
+                        hist = t.history(period="6mo", auto_adjust=True)["Close"]
+                        r = hist.pct_change().dropna()
+                        j = r.index.intersection(spy_ret.index)
+                        if len(j) >= 30:
+                            var = float(_np.var(spy_ret.loc[j]))
+                            if var > 0:
+                                cov = float(_np.cov(r.loc[j], spy_ret.loc[j])[0][1])
+                                beta = round(cov / var, 3)
+                    except Exception:
+                        pass
+                earnings_date = _fetch_next_earnings(t)
                 with connect() as conn:
                     conn.execute(
                         """
@@ -527,7 +614,9 @@ def _enrich_worker(targets: list[str]) -> None:
                             sector = COALESCE(?, sector),
                             industry = COALESCE(?, industry),
                             market_cap = COALESCE(?, market_cap),
-                            beta = COALESCE(?, beta)
+                            beta = COALESCE(?, beta),
+                            earnings_date = ?,
+                            earnings_updated_at = datetime('now')
                         WHERE symbol = ?
                         """,
                         (
@@ -535,7 +624,8 @@ def _enrich_worker(targets: list[str]) -> None:
                             info.get("sector"),
                             info.get("industry"),
                             info.get("marketCap"),
-                            info.get("beta"),
+                            beta,
+                            earnings_date,
                             sym,
                         ),
                     )
@@ -600,6 +690,43 @@ def enrich_status() -> dict:
         return dict(_enrich_state)
 
 
+@app.post("/refresh-earnings")
+def refresh_earnings():
+    """Re-fetch earnings_date for every ticker in the snapshot.
+
+    Unlike /enrich-tickers (which only rescans NULL columns), earnings dates
+    rotate quarterly so this endpoint always covers the full set.
+    """
+    from urllib.parse import quote as _quote
+
+    with _enrich_lock:
+        if _enrich_state["running"]:
+            return RedirectResponse(url="/today?msg=" + _quote("已在跑 enrich"), status_code=303)
+
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT symbol FROM positions_snapshot WHERE import_date = (SELECT MAX(import_date) FROM positions_snapshot)"
+        ).fetchall()
+        targets = [r["symbol"] for r in rows]
+
+    if not targets:
+        return RedirectResponse(url="/today?msg=" + _quote("没 ticker 可刷新"), status_code=303)
+
+    with _enrich_lock:
+        _enrich_state.update({
+            "running": True,
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "total": len(targets),
+            "done": 0,
+            "failed": [],
+        })
+    threading.Thread(target=_enrich_worker, args=(targets,), daemon=True).start()
+    return RedirectResponse(
+        url="/today?msg=" + _quote(f"✓ 后台刷新 {len(targets)} ticker earnings（刷新页面看进度）"),
+        status_code=303,
+    )
+
+
 @app.post("/update-prices")
 def update_prices():
     """Refresh prices in the canonical tickers table + sync to positions cache."""
@@ -642,7 +769,7 @@ def update_prices():
                     if len(hist) == 0:
                         missing.append(symbol)
                         continue
-                    price = float(hist["Close"].iloc[-1])
+                    price = round(float(hist["Close"].iloc[-1]), 3)
                 except Exception:
                     missing.append(symbol)
                     continue
@@ -651,7 +778,7 @@ def update_prices():
                 if len(ser) == 0:
                     missing.append(symbol)
                     continue
-                price = float(ser.iloc[-1])
+                price = round(float(ser.iloc[-1]), 3)
 
             # 1. Upsert canonical price in tickers (single source of truth)
             conn.execute(
@@ -710,12 +837,16 @@ def account_edit(
     account_type: str = Form(...),
     broker: str = Form(...),
     owner: str = Form(...),
+    alias: str = Form(""),
     redirect_anchor: str = Form(""),
 ):
-    """Update account_name, account_type, broker, owner on every row of this account."""
+    """Update account_name, account_type, broker, owner on every row of this
+    account; upsert the optional alias into the accounts lookup table."""
     try:
+        from datetime import datetime as _dt
+        alias_clean = alias.strip()
         with connect() as conn:
-            cur = conn.execute(
+            conn.execute(
                 """
                 UPDATE positions_snapshot
                 SET account_name = ?, account_type = ?, broker = ?, owner = ?
@@ -723,7 +854,23 @@ def account_edit(
                 """,
                 (account_name.strip(), account_type, broker, owner.strip(), account_id),
             )
-            n = cur.rowcount
+            if alias_clean:
+                conn.execute(
+                    """
+                    INSERT INTO accounts (account_id, alias, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(account_id) DO UPDATE SET
+                        alias = excluded.alias,
+                        updated_at = excluded.updated_at
+                    """,
+                    (account_id, alias_clean, _dt.now().isoformat(timespec="seconds")),
+                )
+            else:
+                # Clearing the alias: keep the row but null it out so display falls back.
+                conn.execute(
+                    "UPDATE accounts SET alias = NULL, updated_at = ? WHERE account_id = ?",
+                    (_dt.now().isoformat(timespec="seconds"), account_id),
+                )
         anchor = "acct-" + re.sub(r"[^a-zA-Z0-9_-]", "_", account_id)
         return RedirectResponse(url=f"/#{anchor}", status_code=303)
     except Exception as e:  # noqa: BLE001
@@ -2120,9 +2267,25 @@ def today_view():
         }
         target_rows = conn.execute("SELECT symbol, target_pct FROM target_weights").fetchall()
         sector_target_rows = conn.execute("SELECT sector, target_pct FROM sector_targets").fetchall()
-        ticker_meta_rows = conn.execute("SELECT symbol, sector, beta FROM tickers").fetchall()
+        ticker_meta_rows = conn.execute("SELECT symbol, sector, beta, earnings_date FROM tickers").fetchall()
     sector_lookup = {r["symbol"]: r["sector"] for r in ticker_meta_rows if r["sector"]}
     beta_lookup = {r["symbol"]: r["beta"] for r in ticker_meta_rows if r["beta"] is not None}
+
+    # Earnings window: flag any decision whose ticker reports earnings within 7
+    # calendar days so users can avoid stacking add/reduce orders on top of an
+    # event. Distance is signed days; <0 = past, 0..7 = imminent.
+    from datetime import datetime as _dt
+    _today = date.today()
+    earnings_lookup: dict[str, dict] = {}
+    for r in ticker_meta_rows:
+        if not r["earnings_date"]:
+            continue
+        try:
+            ed = _dt.strptime(r["earnings_date"], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        delta = (ed - _today).days
+        earnings_lookup[r["symbol"]] = {"date": r["earnings_date"], "days": delta}
 
     # Per-ticker portfolio aggregates for drift calculation
     target_weights = {r["symbol"]: r["target_pct"] for r in target_rows}
@@ -2188,6 +2351,7 @@ def today_view():
             # ahead — the goal of derisking is to cut risk, not just cash.
             risk_value = (est_value or 0) * (beta if beta is not None else 1.0)
 
+            earnings = earnings_lookup.get(d["symbol"])
             items.append({
                 "ticker": d["symbol"],
                 "rating": d["rating"],
@@ -2195,6 +2359,8 @@ def today_view():
                 "account_name": account_name,
                 "account_type": a.get("account_type", ""),
                 "action": a.get("action", ""),
+                "earnings_date": earnings["date"] if earnings else None,
+                "earnings_in_days": earnings["days"] if earnings else None,
                 "size_pct": size_pct,
                 "current_qty": qty,
                 "current_price": price,
@@ -2342,6 +2508,38 @@ def today_view():
     }
     totals["net"] = totals["cash_in"] - totals["cash_out"]
 
+    # Portfolio-level risk header: weighted beta, top-5 concentration, cash %.
+    # Beta-weighted by current $ exposure; ticker_total already aggregates value
+    # across accounts. Uses only tickers with known beta; coverage shown so the
+    # user can judge whether the number is representative.
+    beta_weighted_sum = sum(
+        ticker_total[s] * beta_lookup[s]
+        for s in ticker_total
+        if s in beta_lookup
+    )
+    beta_covered_value = sum(ticker_total[s] for s in ticker_total if s in beta_lookup)
+    portfolio_beta = (beta_weighted_sum / beta_covered_value) if beta_covered_value else None
+    beta_coverage_pct = (beta_covered_value / portfolio_total * 100) if portfolio_total else 0
+
+    top5 = sorted(ticker_total.items(), key=lambda kv: -kv[1])[:5]
+    top5_value = sum(v for _, v in top5)
+    top5_pct = (top5_value / portfolio_total * 100) if portfolio_total else 0
+    top5_tickers = ", ".join(t for t, _ in top5)
+
+    cash_total = sum(account_cash.values())
+    invested_plus_cash = portfolio_total + cash_total
+    cash_pct = (cash_total / invested_plus_cash * 100) if invested_plus_cash else 0
+
+    risk = {
+        "portfolio_beta": portfolio_beta,
+        "beta_coverage_pct": beta_coverage_pct,
+        "top5_pct": top5_pct,
+        "top5_tickers": top5_tickers,
+        "cash_total": cash_total,
+        "cash_pct": cash_pct,
+        "portfolio_total": portfolio_total,
+    }
+
     return templates.TemplateResponse(
         _dummy_request(), "today.html",
         {
@@ -2350,7 +2548,375 @@ def today_view():
             "accounts": accounts,
             "totals": totals,
             "n_tickers": len({d["symbol"] for d in decisions}),
+            "risk": risk,
         },
+    )
+
+
+_BACKTEST_CACHE: dict[str, object] = {"key": None, "result": None}
+_TECH_CACHE: dict[str, object] = {"key": None, "result": None}
+
+
+def _compute_technicals() -> dict:
+    """Per-ticker technical snapshot: SMA50/200 cross, 52-week range.
+
+    One yfinance batch fetches 1y of daily closes for every symbol in the
+    latest positions snapshot; everything else is pandas on that frame. Joined
+    against the latest PM rating so conflicts (e.g. Overweight + death cross)
+    surface in the same view."""
+    import yfinance as _yf
+    import pandas as _pd
+    from datetime import date as _date, timedelta as _td
+
+    with connect() as conn:
+        symbols = [r["symbol"] for r in conn.execute(
+            "SELECT DISTINCT symbol FROM positions_snapshot "
+            "WHERE import_date = (SELECT MAX(import_date) FROM positions_snapshot)"
+        ).fetchall()]
+        rating_rows = conn.execute(
+            """
+            WITH latest AS (
+                SELECT symbol, MAX(trade_date) AS d FROM decisions GROUP BY symbol
+            )
+            SELECT d.symbol, d.rating, d.trade_date FROM decisions d
+            JOIN latest l ON l.symbol = d.symbol AND l.d = d.trade_date
+            """
+        ).fetchall()
+    rating_by_sym = {r["symbol"]: (r["rating"], r["trade_date"]) for r in rating_rows}
+
+    if not symbols:
+        return {"rows": [], "as_of": _date.today().isoformat()}
+
+    end = _date.today() + _td(days=1)
+    start = end - _td(days=400)  # 400d buffer for 200 SMA + weekend gaps
+    try:
+        data = _yf.download(symbols, start=start, end=end, progress=False, auto_adjust=True)["Close"]
+    except Exception as e:
+        return {"error": f"yfinance error: {e}", "items": [], "as_of": _date.today().isoformat()}
+    if isinstance(data, _pd.Series):
+        data = data.to_frame()
+
+    rows: list[dict] = []
+    for sym in symbols:
+        if sym not in data.columns:
+            continue
+        col = data[sym].dropna()
+        if col.empty:
+            continue
+        price = float(col.iloc[-1])
+        sma50 = float(col.tail(50).mean()) if len(col) >= 50 else None
+        sma200 = float(col.tail(200).mean()) if len(col) >= 200 else None
+
+        # 52-week window. If we have <252 trading days, use what we have.
+        win = col.tail(252) if len(col) >= 252 else col
+        w_high = float(win.max())
+        w_low = float(win.min())
+        # 0% = at 52w low, 100% = at 52w high. Helps spot stretched buys /
+        # capitulation entries at a glance.
+        pos_pct = ((price - w_low) / (w_high - w_low) * 100) if w_high > w_low else None
+        off_high_pct = ((price - w_high) / w_high * 100) if w_high > 0 else None
+
+        # Trend regime + crossover detection. We walk the last 60 days of the
+        # SMA-difference series and pick up the most recent sign flip to tell
+        # the user how fresh the regime is.
+        cross_label, cross_days = "—", None
+        if sma50 is not None and sma200 is not None:
+            trend = "golden" if sma50 > sma200 else "death"
+            cross_label = "🌟 金叉" if trend == "golden" else "💀 死叉"
+            if len(col) >= 200:
+                s50 = col.rolling(50).mean()
+                s200 = col.rolling(200).mean()
+                diff = (s50 - s200).dropna()
+                if len(diff) >= 2:
+                    sign = (diff > 0).astype(int)
+                    flips = sign.diff().fillna(0)
+                    flip_idx = flips[flips != 0].index
+                    if len(flip_idx) > 0:
+                        last_flip = flip_idx[-1]
+                        cross_days = (col.index[-1] - last_flip).days
+
+        rating, rating_date = rating_by_sym.get(sym, (None, None))
+        # Conflict = PM thesis and trend disagree. Bullish call against a
+        # death cross (or bearish against a golden cross) is the interesting
+        # case to look at twice.
+        conflict = None
+        if rating and sma50 is not None and sma200 is not None:
+            if rating in ("Overweight", "Buy") and sma50 < sma200:
+                conflict = "rating_vs_death"
+            elif rating in ("Underweight", "Sell") and sma50 > sma200:
+                conflict = "rating_vs_golden"
+
+        rows.append({
+            "symbol": sym,
+            "rating": rating,
+            "rating_date": rating_date,
+            "price": price,
+            "sma50": sma50,
+            "sma200": sma200,
+            "trend_label": cross_label,
+            "trend": "golden" if (sma50 and sma200 and sma50 > sma200) else (
+                "death" if (sma50 and sma200 and sma50 < sma200) else None
+            ),
+            "cross_days": cross_days,
+            "w52_high": w_high,
+            "w52_low": w_low,
+            "pos_pct": pos_pct,
+            "off_high_pct": off_high_pct,
+            "conflict": conflict,
+        })
+
+    # Surface conflicts first, then bearish (death), then bullish (golden).
+    # Within each, recent crossovers (low cross_days) lead — fresh regime
+    # changes are more actionable than year-old ones.
+    def _rank(it):
+        c = 0 if it["conflict"] else 1
+        t = {"death": 0, "golden": 1, None: 2}[it["trend"]]
+        d = it["cross_days"] if it["cross_days"] is not None else 9999
+        return (c, t, d, it["symbol"])
+
+    rows.sort(key=_rank)
+
+    counts = {
+        "golden": sum(1 for x in rows if x["trend"] == "golden"),
+        "death": sum(1 for x in rows if x["trend"] == "death"),
+        "conflict": sum(1 for x in rows if x["conflict"]),
+    }
+
+    return {
+        "rows": rows,
+        "counts": counts,
+        "as_of": _date.today().isoformat(),
+    }
+
+
+@app.get("/tech", response_class=HTMLResponse)
+def tech_view():
+    """Technical-analysis snapshot per ticker, joined to latest PM rating."""
+    import time as _time
+    cache_key = int(_time.time() / 3600)
+    if _TECH_CACHE["key"] != cache_key:
+        _TECH_CACHE["result"] = _compute_technicals()
+        _TECH_CACHE["key"] = cache_key
+    tech = _TECH_CACHE["result"]
+
+    return templates.TemplateResponse(
+        _dummy_request(), "tech.html",
+        {"css": CSS, "tech": tech},
+    )
+
+
+def _compute_backtest(windows: list[int]) -> dict:
+    """Forward-return backtest of (trade_date, symbol, rating) decisions.
+
+    For each decision, computes forward return at each window (in trading
+    days). Reports per-rating mean return, win rate, and alpha vs SPY. Pulls
+    daily closes from yfinance in one batch and reuses them across windows.
+    """
+    import yfinance as _yf
+    import pandas as _pd
+    from datetime import timedelta as _td, date as _date
+
+    with connect() as conn:
+        decisions = conn.execute(
+            "SELECT trade_date, symbol, rating FROM decisions"
+        ).fetchall()
+    if not decisions:
+        return {"rows": [], "by_rating": {}, "n_total": 0, "windows": windows, "as_of": None}
+
+    symbols = sorted({d["symbol"] for d in decisions} | {"SPY"})
+    min_date = min(d["trade_date"] for d in decisions)
+    # Pull from 7 days before earliest decision to give yfinance a buffer for
+    # weekends; extend through today.
+    start = (_pd.to_datetime(min_date) - _pd.Timedelta(days=7)).date()
+    end = _date.today() + _td(days=1)
+
+    try:
+        data = _yf.download(symbols, start=start, end=end, progress=False, auto_adjust=True)["Close"]
+    except Exception as e:
+        return {"error": f"yfinance error: {e}", "rows": [], "by_rating": {}, "n_total": 0, "windows": windows}
+
+    if isinstance(data, _pd.Series):
+        data = data.to_frame()
+    data.index = data.index.tz_localize(None) if data.index.tz else data.index
+
+    def _entry_idx(idx: _pd.DatetimeIndex, td: str) -> int | None:
+        """First trading day at or after td."""
+        td_ts = _pd.to_datetime(td)
+        pos = idx.searchsorted(td_ts)
+        return int(pos) if pos < len(idx) else None
+
+    def _fwd_return(sym: str, td: str, n: int) -> float | None:
+        if sym not in data.columns:
+            return None
+        col = data[sym].dropna()
+        if col.empty:
+            return None
+        i0 = _entry_idx(col.index, td)
+        if i0 is None or i0 + n >= len(col):
+            return None
+        p0 = float(col.iloc[i0])
+        p1 = float(col.iloc[i0 + n])
+        return (p1 / p0 - 1) if p0 > 0 else None
+
+    rows = []
+    for d in decisions:
+        sym, rating, td = d["symbol"], d["rating"], d["trade_date"]
+        rec = {"symbol": sym, "rating": rating, "trade_date": td}
+        for n in windows:
+            r = _fwd_return(sym, td, n)
+            b = _fwd_return("SPY", td, n)
+            rec[f"r{n}"] = r
+            rec[f"b{n}"] = b
+            rec[f"a{n}"] = (r - b) if (r is not None and b is not None) else None
+        rows.append(rec)
+
+    # Aggregate by rating. Bullish ratings should produce positive alpha;
+    # bearish should produce negative alpha (and we show the SAME alpha
+    # number — the user mentally negates for shorts. Avoiding sign flips
+    # keeps the table honest: spread = bullish_alpha − bearish_alpha is the
+    # predictive-power metric to watch.)
+    by_rating: dict[str, dict] = {}
+    for rating in _RATING_ORDER:
+        subset = [r for r in rows if r["rating"] == rating]
+        agg = {"n": len(subset)}
+        for n in windows:
+            vals = [r[f"r{n}"] for r in subset if r[f"r{n}"] is not None]
+            alphas = [r[f"a{n}"] for r in subset if r[f"a{n}"] is not None]
+            agg[f"n{n}"] = len(vals)
+            agg[f"mean_r{n}"] = (sum(vals) / len(vals)) if vals else None
+            agg[f"win_r{n}"] = (sum(1 for v in vals if v > 0) / len(vals)) if vals else None
+            agg[f"mean_a{n}"] = (sum(alphas) / len(alphas)) if alphas else None
+        by_rating[rating] = agg
+
+    # Bull − bear alpha spread = the headline number. Positive means
+    # ratings have predictive power on average.
+    spreads = {}
+    for n in windows:
+        bull = (by_rating.get("Overweight", {}).get(f"mean_a{n}") or 0)
+        bear = (by_rating.get("Underweight", {}).get(f"mean_a{n}") or 0)
+        bull_n = by_rating.get("Overweight", {}).get(f"n{n}", 0)
+        bear_n = by_rating.get("Underweight", {}).get(f"n{n}", 0)
+        spreads[n] = {"value": bull - bear, "n_bull": bull_n, "n_bear": bear_n}
+
+    rows.sort(key=lambda r: (r["trade_date"], r["symbol"]))
+    return {
+        "rows": rows,
+        "by_rating": by_rating,
+        "spreads": spreads,
+        "n_total": len(rows),
+        "windows": windows,
+        "as_of": _date.today().isoformat(),
+    }
+
+
+@app.get("/backtest", response_class=HTMLResponse)
+def backtest_view():
+    """Per-rating forward return + alpha vs SPY. Cached for 1h since the
+    underlying decisions table only updates after nightly migrate."""
+    import time as _time
+    # 2d included so users see something even when the system is young.
+    # 5d and 20d are the conventional swing- and monthly-horizon checks.
+    windows = [2, 5, 20]
+    cache_key = f"{windows}-{int(_time.time() / 3600)}"
+    if _BACKTEST_CACHE["key"] != cache_key:
+        _BACKTEST_CACHE["result"] = _compute_backtest(windows)
+        _BACKTEST_CACHE["key"] = cache_key
+    bt = _BACKTEST_CACHE["result"]
+
+    return templates.TemplateResponse(
+        _dummy_request(), "backtest.html",
+        {"css": CSS, "bt": bt, "rating_order": _RATING_ORDER},
+    )
+
+
+@app.get("/alerts", response_class=HTMLResponse)
+def alerts_view():
+    """Stop-loss / price-target proximity monitor.
+
+    For each ticker, takes the latest decision (most recent trade_date), parses
+    stop_loss / price_target from the markdown, and compares against the
+    latest close. Surfaces breaches (price <= stop, or price >= target) plus
+    near-stop warnings so the user can react without re-reading every report.
+    """
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            WITH latest AS (
+                SELECT symbol, MAX(trade_date) AS d FROM decisions GROUP BY symbol
+            )
+            SELECT d.trade_date, d.symbol, d.rating, d.final_decision,
+                   t.last_price, t.last_updated
+            FROM decisions d
+            JOIN latest l ON l.symbol = d.symbol AND l.d = d.trade_date
+            LEFT JOIN tickers t ON t.symbol = d.symbol
+            ORDER BY d.symbol
+            """
+        ).fetchall()
+
+    # Bullish-thesis ratings expect price ↑; bearish expect price ↓. Stop and
+    # target sit on opposite sides for each. For Hold, levels (if any) are
+    # informational only — skip status flagging.
+    bullish = {"Buy", "Overweight"}
+    bearish = {"Underweight", "Sell"}
+
+    items = []
+    for r in rows:
+        price_target, stop_loss = _extract_price_levels(r["final_decision"])
+        price = r["last_price"]
+        rating = r["rating"]
+        if not price or (stop_loss is None and price_target is None):
+            continue
+
+        # Distance is always signed *toward the thesis playing out*:
+        #   bullish: target above (positive Δ = more upside left)
+        #            stop below (positive Δ = cushion remaining)
+        #   bearish: target below (positive Δ = more downside expected)
+        #            stop above (positive Δ = headroom before stopped out)
+        if rating in bearish:
+            dist_to_stop_pct = ((stop_loss - price) / price * 100) if stop_loss else None
+            dist_to_target_pct = ((price - price_target) / price * 100) if price_target else None
+            stop_hit = stop_loss is not None and price >= stop_loss
+            target_hit = price_target is not None and price <= price_target
+        else:
+            dist_to_stop_pct = ((price - stop_loss) / price * 100) if stop_loss else None
+            dist_to_target_pct = ((price_target - price) / price * 100) if price_target else None
+            stop_hit = stop_loss is not None and price <= stop_loss
+            target_hit = price_target is not None and price >= price_target
+
+        if rating == "Hold":
+            status, status_label = "ok", "✓ (Hold)"
+        elif stop_hit:
+            status, status_label = "stop_breached", "🛑 触发止损"
+        elif target_hit:
+            status, status_label = "target_hit", "🎯 触及目标"
+        elif dist_to_stop_pct is not None and dist_to_stop_pct < 5:
+            status, status_label = "stop_warn", "⚠️ 接近止损"
+        else:
+            status, status_label = "ok", "✓"
+
+        items.append({
+            "symbol": r["symbol"],
+            "rating": rating,
+            "trade_date": r["trade_date"],
+            "price": price,
+            "stop_loss": stop_loss,
+            "price_target": price_target,
+            "dist_to_stop_pct": dist_to_stop_pct,
+            "dist_to_target_pct": dist_to_target_pct,
+            "status": status,
+            "status_label": status_label,
+            "last_updated": r["last_updated"],
+            "is_bearish": rating in bearish,
+        })
+
+    _status_rank = {"stop_breached": 0, "target_hit": 1, "stop_warn": 2, "ok": 3}
+    items.sort(key=lambda x: (_status_rank[x["status"]], x["symbol"]))
+
+    counts = {k: sum(1 for it in items if it["status"] == k) for k in _status_rank}
+
+    return templates.TemplateResponse(
+        _dummy_request(), "alerts.html",
+        {"css": CSS, "items": items, "counts": counts, "total": len(items)},
     )
 
 

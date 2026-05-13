@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}决策回测 — Portfolio Manager{% endblock %}
+
+{% macro pct(v) -%}
+  {%- if v is none -%}—{%- else -%}{{ "%+.2f"|format(v * 100) }}%{%- endif -%}
+{%- endmacro %}
+
+{% macro winrate(v) -%}
+  {%- if v is none -%}—{%- else -%}{{ "%.0f"|format(v * 100) }}%{%- endif -%}
+{%- endmacro %}
+
+{% block content %}
+  <h1>📊 决策回测</h1>
+  <p class="subtitle">
+    每个 PM rating 的实际 forward return + 相对 SPY 的 alpha。{{ bt.n_total }} 条决策 · 截至 {{ bt.as_of or "—" }}
+  </p>
+
+  <div style="margin-bottom:14px;">
+    <a class="btn secondary" href="/">← 回到持仓</a>
+    <a class="btn secondary" href="/today">🎯 今日执行</a>
+    <a class="btn secondary" href="/decisions">📋 评级总览</a>
+    <a class="btn secondary" href="/alerts">🚨 止损告警</a>
+  </div>
+
+  {% if bt.error %}
+    <p style="color:var(--loss);">{{ bt.error }}</p>
+  {% endif %}
+
+  <h2 style="font-size:16px;margin-top:8px;">分组汇总（按评级）</h2>
+  <table style="background:var(--bg-subtle);border-radius:8px;border:1px solid var(--border);overflow:hidden;">
+    <thead>
+      <tr>
+        <th>评级</th>
+        <th class="num">总数</th>
+        {% for n in bt.windows %}
+        <th class="num">{{ n }}d 平均收益</th>
+        <th class="num">{{ n }}d 胜率</th>
+        <th class="num">{{ n }}d 平均 α</th>
+        <th class="num">N({{ n }}d)</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for rating in rating_order %}
+        {% set agg = bt.by_rating[rating] %}
+        {% if agg and agg.n %}
+        <tr>
+          <td><span class="tag tag-{{ rating|lower }}" style="padding:3px 10px;">{{ rating }}</span></td>
+          <td class="num">{{ agg.n }}</td>
+          {% for n in bt.windows %}
+            {% set mr = agg['mean_r' ~ n] %}
+            {% set wr = agg['win_r' ~ n] %}
+            {% set ma = agg['mean_a' ~ n] %}
+            <td class="num" style="{% if mr is not none and mr > 0 %}color:var(--gain);{% elif mr is not none and mr < 0 %}color:var(--loss);{% endif %}">{{ pct(mr) }}</td>
+            <td class="num">{{ winrate(wr) }}</td>
+            <td class="num" style="{% if ma is not none and ma > 0 %}color:var(--gain);font-weight:600;{% elif ma is not none and ma < 0 %}color:var(--loss);font-weight:600;{% endif %}">{{ pct(ma) }}</td>
+            <td class="num" style="color:var(--fg-muted);font-size:12px;">{{ agg['n' ~ n] }}</td>
+          {% endfor %}
+        </tr>
+        {% endif %}
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if bt.spreads %}
+  <h2 style="font-size:16px;margin-top:24px;">Overweight − Underweight α spread</h2>
+  <p style="font-size:12px;color:var(--fg-muted);margin-top:0;">
+    正值 = PM 的多空评级有预测力。基于 n_bull + n_bear 个样本对 SPY。
+  </p>
+  <div style="display:flex;gap:24px;flex-wrap:wrap;">
+    {% for n, s in bt.spreads.items() %}
+    <div style="background:var(--bg-subtle);padding:12px 18px;border-radius:8px;border:1px solid var(--border);">
+      <div style="font-size:11px;color:var(--fg-muted);">{{ n }}d spread</div>
+      <div style="font-size:22px;font-weight:600;{% if s.value > 0 %}color:var(--gain);{% elif s.value < 0 %}color:var(--loss);{% endif %}">
+        {{ pct(s.value) }}
+      </div>
+      <div style="font-size:11px;color:var(--fg-muted);">n_OW={{ s.n_bull }} · n_UW={{ s.n_bear }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <h2 style="font-size:16px;margin-top:24px;">逐条明细（{{ bt.n_total }} 条）</h2>
+  <table style="background:var(--bg-subtle);border-radius:8px;border:1px solid var(--border);overflow:hidden;">
+    <thead>
+      <tr>
+        <th>日期</th><th>Ticker</th><th>评级</th>
+        {% for n in bt.windows %}
+        <th class="num">{{ n }}d ret</th>
+        <th class="num">{{ n }}d SPY</th>
+        <th class="num">{{ n }}d α</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in bt.rows %}
+      <tr>
+        <td style="font-size:12px;color:var(--fg-muted);">{{ r.trade_date }}</td>
+        <td><strong>{{ r.symbol }}</strong></td>
+        <td><span class="tag tag-{{ r.rating|lower }}" style="padding:2px 8px;font-size:11px;">{{ r.rating }}</span></td>
+        {% for n in bt.windows %}
+          {% set rv = r['r' ~ n] %}
+          {% set bv = r['b' ~ n] %}
+          {% set av = r['a' ~ n] %}
+          <td class="num" style="{% if rv is not none and rv > 0 %}color:var(--gain);{% elif rv is not none and rv < 0 %}color:var(--loss);{% endif %}">{{ pct(rv) }}</td>
+          <td class="num" style="color:var(--fg-muted);font-size:12px;">{{ pct(bv) }}</td>
+          <td class="num" style="{% if av is not none and av > 0 %}color:var(--gain);font-weight:600;{% elif av is not none and av < 0 %}color:var(--loss);font-weight:600;{% endif %}">{{ pct(av) }}</td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endblock %}

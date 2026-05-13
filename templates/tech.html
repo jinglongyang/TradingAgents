@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}技术面 — Portfolio Manager{% endblock %}
+
+{% block content %}
+  <h1>📈 技术面 · SMA50/200 + 52w</h1>
+  <p class="subtitle">
+    每个持仓的 50/200 日均线状态、最近穿越天数、52 周区间位置。
+    与最新 PM 评级 cross-check：评级和趋势相反时标 ⚠️。
+    截至 {{ tech.as_of }}.
+  </p>
+
+  <div class="status" style="margin-bottom:14px;">
+    {% if tech.counts.conflict %}
+      <span class="tag" style="background:#a16207;color:white;padding:4px 10px;font-size:12px;margin-right:6px;">
+        ⚠️ 评级 vs 趋势冲突: {{ tech.counts.conflict }}
+      </span>
+    {% endif %}
+    <span class="tag" style="background:var(--gain);color:white;padding:4px 10px;font-size:12px;margin-right:6px;">
+      🌟 金叉: {{ tech.counts.golden }}
+    </span>
+    <span class="tag" style="background:var(--loss);color:white;padding:4px 10px;font-size:12px;margin-right:6px;">
+      💀 死叉: {{ tech.counts.death }}
+    </span>
+  </div>
+
+  <div style="margin-bottom:16px;">
+    <a class="btn secondary" href="/">← 回到持仓</a>
+    <a class="btn secondary" href="/today">🎯 今日执行</a>
+    <a class="btn secondary" href="/alerts">🚨 止损告警</a>
+    <a class="btn secondary" href="/backtest">📊 回测</a>
+    <a class="btn secondary" href="/correlation">🔗 相关性</a>
+  </div>
+
+  {% if tech.error %}
+    <p style="color:var(--loss);">{{ tech.error }}</p>
+  {% endif %}
+
+  <table style="background:var(--bg-subtle);border-radius:8px;border:1px solid var(--border);overflow:hidden;">
+    <thead>
+      <tr>
+        <th>Ticker</th>
+        <th>评级</th>
+        <th class="num">价格</th>
+        <th class="num">SMA50</th>
+        <th class="num">SMA200</th>
+        <th>趋势</th>
+        <th class="num">穿越前 N 日</th>
+        <th class="num">52w 高</th>
+        <th class="num">52w 低</th>
+        <th class="num">区间位置</th>
+        <th class="num">距 52w 高</th>
+        <th>提示</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for it in tech.rows %}
+      <tr style="{% if it.conflict %}background:rgba(161,98,7,0.10);{% elif it.trend == 'death' %}background:rgba(239,68,68,0.05);{% elif it.trend == 'golden' %}background:rgba(16,185,129,0.04);{% endif %}">
+        <td><strong>{{ it.symbol }}</strong></td>
+        <td>{% if it.rating %}<span class="tag tag-{{ it.rating|lower }}" style="padding:2px 8px;font-size:11px;">{{ it.rating }}</span>{% else %}—{% endif %}</td>
+        <td class="num">${{ "%.2f"|format(it.price) }}</td>
+        <td class="num">{% if it.sma50 %}${{ "%.2f"|format(it.sma50) }}{% else %}—{% endif %}</td>
+        <td class="num">{% if it.sma200 %}${{ "%.2f"|format(it.sma200) }}{% else %}—{% endif %}</td>
+        <td>
+          {% if it.trend %}
+            <span style="font-weight:600;color:{% if it.trend == 'golden' %}var(--gain){% else %}var(--loss){% endif %};">
+              {{ it.trend_label }}
+            </span>
+          {% else %}—{% endif %}
+        </td>
+        <td class="num" style="font-size:12px;color:var(--fg-muted);">{% if it.cross_days is not none %}{{ it.cross_days }} d{% else %}—{% endif %}</td>
+        <td class="num">${{ "%.2f"|format(it.w52_high) }}</td>
+        <td class="num">${{ "%.2f"|format(it.w52_low) }}</td>
+        <td class="num" style="{% if it.pos_pct is not none and it.pos_pct > 90 %}color:var(--loss);font-weight:600;{% elif it.pos_pct is not none and it.pos_pct < 20 %}color:var(--gain);font-weight:600;{% endif %}">
+          {% if it.pos_pct is not none %}{{ "%.0f"|format(it.pos_pct) }}%{% else %}—{% endif %}
+        </td>
+        <td class="num" style="{% if it.off_high_pct is not none and it.off_high_pct < -20 %}color:var(--gain);{% endif %}">
+          {% if it.off_high_pct is not none %}{{ "%+.1f"|format(it.off_high_pct) }}%{% else %}—{% endif %}
+        </td>
+        <td style="font-size:11px;">
+          {% if it.conflict == 'rating_vs_death' %}
+            <span style="color:#a16207;font-weight:600;">⚠️ {{ it.rating }} 但死叉</span>
+          {% elif it.conflict == 'rating_vs_golden' %}
+            <span style="color:#a16207;font-weight:600;">⚠️ {{ it.rating }} 但金叉</span>
+          {% elif it.pos_pct is not none and it.pos_pct > 95 %}
+            <span style="color:var(--loss);">📈 接近 52w 高</span>
+          {% elif it.pos_pct is not none and it.pos_pct < 5 %}
+            <span style="color:var(--gain);">📉 接近 52w 低</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endblock %}
