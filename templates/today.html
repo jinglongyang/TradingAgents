@@ -39,6 +39,41 @@
         <span style="color:var(--fg-muted);font-size:11px;margin-left:4px;">({{ "%.1f"|format(risk.cash_pct) }}%)</span>
       </div>
     </div>
+    {% if risk.sigma_annual is defined %}
+    <div style="display:flex;gap:28px;align-items:center;flex-wrap:wrap;font-size:12px;margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);">
+      <div title="按当前持仓权重×过去 ~252 日 daily return 重建的组合 buy-and-hold 收益序列，年化标准差。">
+        <span style="color:var(--fg-muted);">σ 年化</span>
+        <span style="font-weight:600;margin-left:6px;{% if risk.sigma_annual > 0.25 %}color:var(--loss);{% elif risk.sigma_annual < 0.12 %}color:var(--gain);{% endif %}">
+          {{ "%.1f"|format(risk.sigma_annual * 100) }}%
+        </span>
+      </div>
+      <div title="(年化收益 − 4.5% rf) / σ。SPY 同窗口 Sharpe 在括号里做对照。">
+        <span style="color:var(--fg-muted);">Sharpe</span>
+        <span style="font-weight:600;margin-left:6px;{% if risk.sharpe is not none and risk.sharpe > 1 %}color:var(--gain);{% elif risk.sharpe is not none and risk.sharpe < 0 %}color:var(--loss);{% endif %}">
+          {% if risk.sharpe is not none %}{{ "%.2f"|format(risk.sharpe) }}{% else %}—{% endif %}
+        </span>
+        {% if risk.spy_sharpe is not none %}
+        <span style="color:var(--fg-muted);font-size:11px;margin-left:4px;">(SPY {{ "%.2f"|format(risk.spy_sharpe) }})</span>
+        {% endif %}
+      </div>
+      <div title="只用日跌幅算分母的 Sharpe — 对下行波动惩罚更准。">
+        <span style="color:var(--fg-muted);">Sortino</span>
+        <span style="font-weight:600;margin-left:6px;{% if risk.sortino is not none and risk.sortino > 1.5 %}color:var(--gain);{% elif risk.sortino is not none and risk.sortino < 0 %}color:var(--loss);{% endif %}">
+          {% if risk.sortino is not none %}{{ "%.2f"|format(risk.sortino) }}{% else %}—{% endif %}
+        </span>
+      </div>
+      <div title="历史最大回撤 / 当前距高点的回撤（同 252 日窗口）">
+        <span style="color:var(--fg-muted);">回撤</span>
+        <span style="font-weight:600;margin-left:6px;color:var(--loss);">
+          {{ "%.1f"|format(risk.current_drawdown * 100) }}%
+        </span>
+        <span style="color:var(--fg-muted);font-size:11px;margin-left:4px;">(峰值 {{ "%.1f"|format(risk.max_drawdown * 100) }}%)</span>
+      </div>
+      <div style="color:var(--fg-muted);font-size:11px;">
+        {{ risk.lookback_days }}d · {{ risk.coverage_syms }}/{{ risk.total_syms }} 覆盖
+      </div>
+    </div>
+    {% endif %}
   </div>
   {% endif %}
 
@@ -151,6 +186,11 @@
               {% if i.beta is not none %}
                 <div style="font-size:10px;color:var(--fg-muted);">β {{ "%.2f"|format(i.beta) }} → 风险 ${{ "{:,.0f}".format(i.risk_value) }}</div>
               {% endif %}
+              {% if i.vol_annual is not none %}
+                <div style="font-size:10px;color:var(--fg-muted);" title="60d 年化波动率 · 1% 风险预算下的建议仓位 = portfolio×1%/σ">
+                  σ {{ "%.0f"|format(i.vol_annual * 100) }}% → 目标 ${{ "{:,.0f}".format(i.vol_target_dollars) }}
+                </div>
+              {% endif %}
             </td>
             <td class="num" style="font-size:11px;color:var(--fg-muted);">—</td>
             <td class="num" style="font-size:11px;color:var(--fg-muted);">—</td>
@@ -192,6 +232,11 @@
               {% if i.est_value is not none %}${{ "{:,.0f}".format(i.est_value) }}{% endif %}
               {% if i.alloc_status == 'partial' %}<div style="font-size:10px;color:#d97706;">可付 ${{ "{:,.0f}".format(i.alloc_amount) }}</div>
               {% elif i.alloc_status == 'skip' %}<div style="font-size:10px;color:var(--loss);">预算不足</div>{% endif %}
+              {% if i.vol_annual is not none %}
+                <div style="font-size:10px;color:{% if i.vol_oversize %}var(--loss){% else %}var(--fg-muted){% endif %};" title="60d 年化波动率 · 1% 风险预算下的建议仓位 = portfolio×1%/σ。LLM 建议>2× 时标红">
+                  σ {{ "%.0f"|format(i.vol_annual * 100) }}% → 目标 ${{ "{:,.0f}".format(i.vol_target_dollars) }}{% if i.vol_oversize %} ⚠{% endif %}
+                </div>
+              {% endif %}
             </td>
             <td class="num" style="font-size:11px;">
               {% if i.expected_return is not none %}

@@ -62,6 +62,46 @@
     </tbody>
   </table>
 
+  {% if bt.calibration %}
+  <h2 style="font-size:16px;margin-top:24px;">评级校准 (Rating Calibration)</h2>
+  <p style="font-size:12px;color:var(--fg-muted);margin-top:0;">
+    把评级当序数（Buy=2 / Overweight=1 / Hold=0 / Underweight=-1 / Sell=-2），按各桶样本量加权，
+    与 mean α 算 Spearman 等级相关。<strong>+1</strong> = 越看多越赚 α；<strong>0</strong> = 评级无预测力；
+    <strong>−1</strong> = 评级反向。单调性 ✓ 表示 Buy→Sell 排序下 α 是严格非升。
+  </p>
+  <table style="background:var(--bg-subtle);border-radius:8px;border:1px solid var(--border);overflow:hidden;">
+    <thead>
+      <tr>
+        <th>窗口</th>
+        <th class="num">Spearman ρ</th>
+        <th>单调</th>
+        <th class="num">参与桶</th>
+        <th>桶序 (Buy → Sell) · 加权 α</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for n in bt.windows %}
+        {% set c = bt.calibration[n] %}
+        <tr>
+          <td>{{ n }}d</td>
+          <td class="num" style="font-weight:600;{% if c.spearman is not none and c.spearman > 0.5 %}color:var(--gain);{% elif c.spearman is not none and c.spearman < 0 %}color:var(--loss);{% endif %}">
+            {% if c.spearman is not none %}{{ "%+.2f"|format(c.spearman) }}{% else %}—{% endif %}
+          </td>
+          <td>
+            {% if c.monotone is none %}—
+            {% elif c.monotone %}<span style="color:var(--gain);">✓</span>
+            {% else %}<span style="color:var(--loss);">✗</span>{% endif %}
+          </td>
+          <td class="num">{{ c.n_buckets }}</td>
+          <td style="font-size:11px;color:var(--fg-muted);font-family:ui-monospace,monospace;">
+            {% for b in c.buckets %}{{ pct(b[1]) }}{% if not loop.last %} → {% endif %}{% endfor %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
   {% if bt.spreads %}
   <h2 style="font-size:16px;margin-top:24px;">Overweight − Underweight α spread</h2>
   <p style="font-size:12px;color:var(--fg-muted);margin-top:0;">

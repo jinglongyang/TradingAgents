@@ -2540,6 +2540,29 @@ def today_view():
         "portfolio_total": portfolio_total,
     }
 
+    # σ / Sharpe / Sortino / drawdown — buy-and-hold-current-basket proxy over
+    # the past year. Empty dict on data miss; template guards on key presence.
+    if portfolio_total > 0:
+        weights = {s: v / portfolio_total for s, v in ticker_total.items() if v > 0}
+        risk.update(_compute_portfolio_risk(weights))
+
+    # Vol-target sizing — attach (annualized 60d vol, suggested $) to every
+    # add/reduce so the user can sanity-check LLM size_pct against a risk
+    # budget. Computed once for the union of symbols across all items.
+    symbols_in_view = sorted({it["ticker"] for acct in accounts for bucket in ("adds", "reduces") for it in acct[bucket]})
+    vol_targets = _compute_vol_targets(symbols_in_view, portfolio_total)
+    for acct in accounts:
+        for bucket in ("adds", "reduces"):
+            for it in acct[bucket]:
+                vt = vol_targets.get(it["ticker"])
+                it["vol_annual"] = vt["vol_annual"] if vt else None
+                it["vol_target_dollars"] = vt["vol_target_dollars"] if vt else None
+                it["vol_target_pct_portfolio"] = vt["vol_target_pct_portfolio"] if vt else None
+                # Convenience flag — LLM suggested >2× the vol-target sizing.
+                ev = it.get("est_value") or 0
+                vtd = vt["vol_target_dollars"] if vt else 0
+                it["vol_oversize"] = bool(vt and vtd > 0 and bucket == "adds" and ev > 2 * vtd)
+
     return templates.TemplateResponse(
         _dummy_request(), "today.html",
         {
@@ -2555,6 +2578,236 @@ def today_view():
 
 _BACKTEST_CACHE: dict[str, object] = {"key": None, "result": None}
 _TECH_CACHE: dict[str, object] = {"key": None, "result": None}
+_RETURNS_CACHE: dict[str, object] = {"key": None, "data": None, "vol": None}
+
+# Annual risk-free rate used by Sharpe / Sortino. 4.5% ≈ 3-month T-bill yield
+# at the time of writing. Hardcoded — fetching live is overkill for a sanity
+# metric that only matters at 1-decimal precision.
+RISK_FREE_RATE_ANNUAL = 0.045
+
+# Per-position risk budget for vol-targeted sizing. position_$ × annualized_vol
+# = budget_$ → position_$ = (budget_pct × portfolio_total) / vol. Stocks with
+# 50% vol get half the dollars of stocks with 25% vol so each position
+# contributes the same expected daily PnL swing.
+RISK_BUDGET_PER_POSITION_PCT = 1.0
+
+
+def _fetch_returns_matrix(symbols: list[str], days: int = 252) -> "pd.DataFrame | None":
+    """Daily simple-return DataFrame for ``symbols`` over the last ``days``
+    trading days, with hourly cache. Returns None when yfinance fails."""
+    import pandas as _pd
+    import yfinance as _yf
+    from datetime import date as _date, timedelta as _td
+    import time as _time
+
+    syms = tuple(sorted(set(symbols)))
+    if not syms:
+        return None
+    key = (syms, days, int(_time.time() / 3600))
+    if _RETURNS_CACHE["key"] == key:
+        return _RETURNS_CACHE["data"]
+
+    end = _date.today() + _td(days=1)
+    start = end - _td(days=int(days * 1.5) + 14)  # buffer for weekends/holidays
+    try:
+        raw = _yf.download(list(syms), start=start, end=end, progress=False, auto_adjust=True)["Close"]
+    except Exception:
+        return None
+    if isinstance(raw, _pd.Series):
+        raw = raw.to_frame()
+    if raw.index.tz is not None:
+        raw.index = raw.index.tz_localize(None)
+    rets = raw.pct_change().dropna(how="all").tail(days)
+
+    _RETURNS_CACHE["key"] = key
+    _RETURNS_CACHE["data"] = rets
+    _RETURNS_CACHE["vol"] = None  # invalidate dependent vol cache
+    return rets
+
+
+def _compute_portfolio_risk(ticker_weights: dict[str, float]) -> dict:
+    """Buy-and-hold-of-current-basket risk metrics over the last ~252 trading
+    days.
+
+    Weights are current $ exposure / portfolio_total. We construct the daily
+    portfolio return as ``Σ w_i r_i,t`` using those frozen weights, then derive
+    annualized σ, Sharpe (vs RISK_FREE_RATE_ANNUAL), Sortino (downside-only σ),
+    historical max drawdown, and current drawdown from peak.
+
+    This is an ex-ante risk snapshot, not a P&L reconstruction — it tells the
+    user "if I'd held today's basket for the past year, what would risk have
+    looked like." For a P&L history we'd need to replay executions, which the
+    /performance page already does."""
+    import math as _math
+    import pandas as _pd
+
+    syms = [s for s, w in ticker_weights.items() if w and w > 0]
+    total_w = sum(ticker_weights[s] for s in syms)
+    if not syms or total_w <= 0:
+        return {}
+
+    # +SPY so we can show benchmark Sharpe side-by-side. Missing data on SPY is
+    # not fatal — we just suppress the benchmark line.
+    rets = _fetch_returns_matrix(syms + ["SPY"], days=252)
+    if rets is None or rets.empty:
+        return {}
+
+    # Restrict to columns we actually got data for; renormalize.
+    available = [s for s in syms if s in rets.columns]
+    if not available:
+        return {}
+    w_norm = _pd.Series(
+        {s: ticker_weights[s] / sum(ticker_weights[k] for k in available) for s in available}
+    )
+    port_rets = (rets[available].fillna(0).mul(w_norm, axis=1)).sum(axis=1)
+    port_rets = port_rets[port_rets != 0]  # drop pre-listing days where every weight is 0
+    if len(port_rets) < 20:
+        return {}
+
+    daily_mu = float(port_rets.mean())
+    daily_sigma = float(port_rets.std(ddof=1))
+    ann_mu = daily_mu * 252
+    ann_sigma = daily_sigma * _math.sqrt(252)
+
+    excess_ann = ann_mu - RISK_FREE_RATE_ANNUAL
+    sharpe = (excess_ann / ann_sigma) if ann_sigma > 0 else None
+
+    downside = port_rets[port_rets < 0]
+    down_sigma_ann = float(downside.std(ddof=1)) * _math.sqrt(252) if len(downside) > 1 else None
+    sortino = (excess_ann / down_sigma_ann) if (down_sigma_ann and down_sigma_ann > 0) else None
+
+    cum = (1 + port_rets).cumprod()
+    running_peak = cum.cummax()
+    drawdown = (cum / running_peak - 1)
+    max_dd = float(drawdown.min())
+    current_dd = float(drawdown.iloc[-1])
+
+    # SPY benchmark for the same window (raw, not weighted).
+    spy_sharpe = None
+    if "SPY" in rets.columns:
+        spy_rets = rets["SPY"].dropna()
+        if len(spy_rets) >= 20:
+            spy_ann_mu = float(spy_rets.mean()) * 252
+            spy_ann_sigma = float(spy_rets.std(ddof=1)) * _math.sqrt(252)
+            spy_sharpe = ((spy_ann_mu - RISK_FREE_RATE_ANNUAL) / spy_ann_sigma) if spy_ann_sigma > 0 else None
+
+    return {
+        "sigma_annual": ann_sigma,
+        "sharpe": sharpe,
+        "sortino": sortino,
+        "max_drawdown": max_dd,
+        "current_drawdown": current_dd,
+        "spy_sharpe": spy_sharpe,
+        "lookback_days": int(len(port_rets)),
+        "coverage_syms": len(available),
+        "total_syms": len(syms),
+    }
+
+
+def _compute_vol_targets(symbols: list[str], portfolio_total: float) -> dict[str, dict]:
+    """Per-ticker realized annualized vol + the dollar size that puts the
+    position at RISK_BUDGET_PER_POSITION_PCT of portfolio risk.
+
+    Uses the same 252d returns matrix as _compute_portfolio_risk. Returns
+    {symbol: {vol_annual, vol_target_$, vol_target_pct_portfolio}}."""
+    import math as _math
+
+    if not symbols or portfolio_total <= 0:
+        return {}
+    rets = _fetch_returns_matrix(symbols, days=252)
+    if rets is None or rets.empty:
+        return {}
+
+    budget_dollars = portfolio_total * (RISK_BUDGET_PER_POSITION_PCT / 100.0)
+    out: dict[str, dict] = {}
+    for sym in symbols:
+        if sym not in rets.columns:
+            continue
+        col = rets[sym].dropna().tail(60)  # 60-day realized vol — responsive but not noisy
+        if len(col) < 20:
+            continue
+        sigma_ann = float(col.std(ddof=1)) * _math.sqrt(252)
+        if sigma_ann <= 0:
+            continue
+        target_dollars = budget_dollars / sigma_ann
+        out[sym] = {
+            "vol_annual": sigma_ann,
+            "vol_target_dollars": target_dollars,
+            "vol_target_pct_portfolio": (target_dollars / portfolio_total * 100),
+        }
+    return out
+
+
+def _compute_rating_calibration(by_rating: dict, windows: list[int]) -> dict:
+    """Rank correlation between rating bullishness and realized α at each
+    forward window.
+
+    Maps bullishness ordinally (Buy=2, Overweight=1, Hold=0, Underweight=-1,
+    Sell=-2), weights each bucket by its N, and computes Spearman rank
+    correlation against mean α. Positive = rating ordering is predictive.
+
+    Also flags strict monotonicity: do the buckets line up bullish→bearish in
+    α order? Two checks fail independently — a strong corr with one inversion
+    is more useful than knowing only "not perfectly monotone"."""
+    import math as _math
+
+    bullishness = {"Buy": 2, "Overweight": 1, "Hold": 0, "Underweight": -1, "Sell": -2}
+    calib: dict[int, dict] = {}
+    for n in windows:
+        pts: list[tuple[int, float, int]] = []  # (bullishness, mean_a, N)
+        for rating, agg in by_rating.items():
+            if rating not in bullishness:
+                continue
+            ma = agg.get(f"mean_a{n}")
+            ni = agg.get(f"n{n}", 0)
+            if ma is None or ni <= 0:
+                continue
+            pts.append((bullishness[rating], float(ma), int(ni)))
+        if len(pts) < 3:
+            calib[n] = {"spearman": None, "monotone": None, "n_buckets": len(pts), "buckets": pts}
+            continue
+        # Weighted Pearson on ranks ≡ a sample-weighted Spearman.
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        ws = [p[2] for p in pts]
+        # Rank xs (already ints) and ys.
+        x_ranks = _rank_with_ties(xs)
+        y_ranks = _rank_with_ties(ys)
+        sw = sum(ws)
+        mx = sum(w * r for w, r in zip(ws, x_ranks)) / sw
+        my = sum(w * r for w, r in zip(ws, y_ranks)) / sw
+        cov = sum(w * (xr - mx) * (yr - my) for w, xr, yr in zip(ws, x_ranks, y_ranks)) / sw
+        vx = sum(w * (xr - mx) ** 2 for w, xr in zip(ws, x_ranks)) / sw
+        vy = sum(w * (yr - my) ** 2 for w, yr in zip(ws, y_ranks)) / sw
+        denom = _math.sqrt(vx * vy) if vx > 0 and vy > 0 else 0
+        spearman = (cov / denom) if denom > 0 else None
+        # Monotonicity: sort by bullishness desc, check α decreases (or at
+        # least non-increases).
+        ordered = sorted(pts, key=lambda p: -p[0])
+        monotone = all(ordered[i][1] >= ordered[i + 1][1] for i in range(len(ordered) - 1))
+        calib[n] = {
+            "spearman": spearman,
+            "monotone": monotone,
+            "n_buckets": len(pts),
+            "buckets": ordered,
+        }
+    return calib
+
+
+def _rank_with_ties(xs: list[float]) -> list[float]:
+    """Average-rank ties so Spearman is well-defined on small bucket counts."""
+    indexed = sorted(enumerate(xs), key=lambda t: t[1])
+    ranks = [0.0] * len(xs)
+    i = 0
+    while i < len(indexed):
+        j = i
+        while j + 1 < len(indexed) and indexed[j + 1][1] == indexed[i][1]:
+            j += 1
+        avg_rank = (i + j) / 2 + 1
+        for k in range(i, j + 1):
+            ranks[indexed[k][0]] = avg_rank
+        i = j + 1
+    return ranks
 
 
 def _compute_technicals() -> dict:
@@ -2799,10 +3052,14 @@ def _compute_backtest(windows: list[int]) -> dict:
         spreads[n] = {"value": bull - bear, "n_bull": bull_n, "n_bear": bear_n}
 
     rows.sort(key=lambda r: (r["trade_date"], r["symbol"]))
+
+    # Rating calibration: does bullishness order predict α order?
+    calibration = _compute_rating_calibration(by_rating, windows)
     return {
         "rows": rows,
         "by_rating": by_rating,
         "spreads": spreads,
+        "calibration": calibration,
         "n_total": len(rows),
         "windows": windows,
         "as_of": _date.today().isoformat(),
