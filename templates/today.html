@@ -191,6 +191,11 @@
                   σ {{ "%.0f"|format(i.vol_annual * 100) }}% → 目标 ${{ "{:,.0f}".format(i.vol_target_dollars) }}
                 </div>
               {% endif %}
+              {% if i.pct_of_adv is not none %}
+                <div style="font-size:10px;color:{% if i.adv_oversize %}var(--loss){% else %}var(--fg-muted){% endif %};" title="本次卖出 vs 该 ticker 20d 平均日成交额。>5% 一般会有可观滑点，考虑拆单。">
+                  ADV ${{ "{:,.1f}".format(i.adv_dollars / 1e6) }}M · 占 {{ "%.1f"|format(i.pct_of_adv) }}%{% if i.adv_oversize %} ⚠{% endif %}
+                </div>
+              {% endif %}
             </td>
             <td class="num" style="font-size:11px;color:var(--fg-muted);">—</td>
             <td class="num" style="font-size:11px;color:var(--fg-muted);">—</td>
@@ -235,6 +240,11 @@
               {% if i.vol_annual is not none %}
                 <div style="font-size:10px;color:{% if i.vol_oversize %}var(--loss){% else %}var(--fg-muted){% endif %};" title="60d 年化波动率 · 1% 风险预算下的建议仓位 = portfolio×1%/σ。LLM 建议>2× 时标红">
                   σ {{ "%.0f"|format(i.vol_annual * 100) }}% → 目标 ${{ "{:,.0f}".format(i.vol_target_dollars) }}{% if i.vol_oversize %} ⚠{% endif %}
+                </div>
+              {% endif %}
+              {% if i.pct_of_adv is not none %}
+                <div style="font-size:10px;color:{% if i.adv_oversize %}var(--loss){% else %}var(--fg-muted){% endif %};" title="本次买入 vs 该 ticker 20d 平均日成交额。>5% 一般会有可观滑点，考虑拆单。">
+                  ADV ${{ "{:,.1f}".format(i.adv_dollars / 1e6) }}M · 占 {{ "%.1f"|format(i.pct_of_adv) }}%{% if i.adv_oversize %} ⚠{% endif %}
                 </div>
               {% endif %}
             </td>

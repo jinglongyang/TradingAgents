@@ -2551,6 +2551,7 @@ def today_view():
     # budget. Computed once for the union of symbols across all items.
     symbols_in_view = sorted({it["ticker"] for acct in accounts for bucket in ("adds", "reduces") for it in acct[bucket]})
     vol_targets = _compute_vol_targets(symbols_in_view, portfolio_total)
+    adv_map = _fetch_avg_dollar_volume(symbols_in_view, days=20)
     for acct in accounts:
         for bucket in ("adds", "reduces"):
             for it in acct[bucket]:
@@ -2562,6 +2563,13 @@ def today_view():
                 ev = it.get("est_value") or 0
                 vtd = vt["vol_target_dollars"] if vt else 0
                 it["vol_oversize"] = bool(vt and vtd > 0 and bucket == "adds" and ev > 2 * vtd)
+
+                # Liquidity: est_value as % of 20d avg $ volume. >5% is a
+                # rough threshold for non-trivial slippage; consider splitting.
+                adv = adv_map.get(it["ticker"])
+                it["adv_dollars"] = adv
+                it["pct_of_adv"] = (ev / adv * 100) if (adv and adv > 0 and ev > 0) else None
+                it["adv_oversize"] = bool(it["pct_of_adv"] is not None and it["pct_of_adv"] > 5)
 
     return templates.TemplateResponse(
         _dummy_request(), "today.html",
@@ -2579,6 +2587,7 @@ def today_view():
 _BACKTEST_CACHE: dict[str, object] = {"key": None, "result": None}
 _TECH_CACHE: dict[str, object] = {"key": None, "result": None}
 _RETURNS_CACHE: dict[str, object] = {"key": None, "data": None, "vol": None}
+_ADV_CACHE: dict[str, object] = {"key": None, "data": None}
 
 # Annual risk-free rate used by Sharpe / Sortino. 4.5% ≈ 3-month T-bill yield
 # at the time of writing. Hardcoded — fetching live is overkill for a sanity
@@ -2670,11 +2679,14 @@ def _compute_portfolio_risk(ticker_weights: dict[str, float]) -> dict:
     ann_sigma = daily_sigma * _math.sqrt(252)
 
     excess_ann = ann_mu - RISK_FREE_RATE_ANNUAL
-    sharpe = (excess_ann / ann_sigma) if ann_sigma > 0 else None
+    # 1e-6 = effectively-zero floor. Constant-return series gives float-noise σ
+    # which would otherwise yield astronomical Sharpe (e.g. 5e16) from ε in the
+    # denominator. Returning None is more honest.
+    sharpe = (excess_ann / ann_sigma) if ann_sigma > 1e-6 else None
 
     downside = port_rets[port_rets < 0]
     down_sigma_ann = float(downside.std(ddof=1)) * _math.sqrt(252) if len(downside) > 1 else None
-    sortino = (excess_ann / down_sigma_ann) if (down_sigma_ann and down_sigma_ann > 0) else None
+    sortino = (excess_ann / down_sigma_ann) if (down_sigma_ann and down_sigma_ann > 1e-6) else None
 
     cum = (1 + port_rets).cumprod()
     running_peak = cum.cummax()
@@ -2689,7 +2701,7 @@ def _compute_portfolio_risk(ticker_weights: dict[str, float]) -> dict:
         if len(spy_rets) >= 20:
             spy_ann_mu = float(spy_rets.mean()) * 252
             spy_ann_sigma = float(spy_rets.std(ddof=1)) * _math.sqrt(252)
-            spy_sharpe = ((spy_ann_mu - RISK_FREE_RATE_ANNUAL) / spy_ann_sigma) if spy_ann_sigma > 0 else None
+            spy_sharpe = ((spy_ann_mu - RISK_FREE_RATE_ANNUAL) / spy_ann_sigma) if spy_ann_sigma > 1e-6 else None
 
     return {
         "sigma_annual": ann_sigma,
@@ -2727,7 +2739,7 @@ def _compute_vol_targets(symbols: list[str], portfolio_total: float) -> dict[str
         if len(col) < 20:
             continue
         sigma_ann = float(col.std(ddof=1)) * _math.sqrt(252)
-        if sigma_ann <= 0:
+        if sigma_ann <= 1e-6:
             continue
         target_dollars = budget_dollars / sigma_ann
         out[sym] = {
@@ -2792,6 +2804,62 @@ def _compute_rating_calibration(by_rating: dict, windows: list[int]) -> dict:
             "buckets": ordered,
         }
     return calib
+
+
+def _fetch_avg_dollar_volume(symbols: list[str], days: int = 20) -> dict[str, float]:
+    """Average daily dollar volume = close × volume averaged over last ``days``
+    trading days. Used to flag /today reduce/add sizes that are large relative
+    to a ticker's normal liquidity (>5% of ADV is a rough rule of thumb for
+    when market-impact slippage stops being negligible).
+
+    yfinance with ``auto_adjust=True`` returns split-adjusted close *and*
+    volume, so the product is internally consistent for cross-split history.
+    Cached hourly — ADV moves slowly enough that intraday refreshes are noise."""
+    import pandas as _pd
+    import yfinance as _yf
+    from datetime import date as _date, timedelta as _td
+    import time as _time
+
+    syms = tuple(sorted(set(symbols)))
+    if not syms:
+        return {}
+    key = (syms, days, int(_time.time() / 3600))
+    if _ADV_CACHE["key"] == key:
+        return _ADV_CACHE["data"]
+
+    end = _date.today() + _td(days=1)
+    start = end - _td(days=int(days * 2) + 14)
+    try:
+        raw = _yf.download(list(syms), start=start, end=end, progress=False, auto_adjust=True)
+    except Exception:
+        return {}
+    if raw is None or raw.empty:
+        return {}
+    try:
+        close = raw["Close"]
+        vol = raw["Volume"]
+    except Exception:
+        return {}
+    if isinstance(close, _pd.Series):
+        close = close.to_frame(name=syms[0])
+        vol = vol.to_frame(name=syms[0])
+
+    out: dict[str, float] = {}
+    for sym in syms:
+        if sym not in close.columns or sym not in vol.columns:
+            continue
+        c = close[sym].dropna().tail(days)
+        v = vol[sym].dropna().tail(days)
+        df = _pd.concat([c, v], axis=1, join="inner").dropna()
+        if df.empty:
+            continue
+        dollar_vol = float((df.iloc[:, 0] * df.iloc[:, 1]).mean())
+        if dollar_vol > 0:
+            out[sym] = dollar_vol
+
+    _ADV_CACHE["key"] = key
+    _ADV_CACHE["data"] = out
+    return out
 
 
 def _rank_with_ties(xs: list[float]) -> list[float]:
