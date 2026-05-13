@@ -60,51 +60,15 @@ def get_insider_transactions(
     return route_to_vendor("get_insider_transactions", ticker)
 
 
-@tool
-def web_search_news(
-    query: Annotated[str, "Search query (e.g. 'CRWV Q1 2026 earnings', 'NVDA Nvidia investment')"],
-    max_results: Annotated[int, "Maximum number of articles to return"] = 5,
-) -> str:
-    """
-    Live web news search via Tavily — covers events that yfinance/alpha_vantage news
-    APIs miss (recent 8-K filings, credit rating actions, large strategic
-    investments, partnership announcements, late-breaking earnings reactions).
-    Use this whenever the structured news tools return stale or sparse results.
-
-    Requires TAVILY_API_KEY in the environment. Returns formatted string with
-    title + url + relevant content snippet per result.
-    """
-    api_key = os.environ.get("TAVILY_API_KEY")
-    if not api_key:
-        return (
-            "[web_search_news unavailable: TAVILY_API_KEY not set in env. "
-            "Continue analysis with the structured news tools only.]"
-        )
-    try:
-        from langchain_tavily import TavilySearch
-    except ImportError:
-        return "[web_search_news unavailable: langchain-tavily not installed.]"
-
-    search = TavilySearch(
-        max_results=max_results,
-        topic="news",
-        search_depth="advanced",
-    )
-    try:
-        result = search.invoke({"query": query})
-    except Exception as e:  # noqa: BLE001
-        return f"[web_search_news error: {e}]"
-
-    items = result.get("results", []) if isinstance(result, dict) else result
+def _format_news_results(query: str, items: list[dict], max_results: int) -> str:
     if not items:
         return f"No web results found for query: {query!r}"
-
     out = [f"Web news for: {query!r}", ""]
     for i, r in enumerate(items[:max_results], 1):
         title = r.get("title", "(no title)")
         url = r.get("url", "")
-        snippet = (r.get("content") or "")[:600].replace("\n", " ")
-        date = r.get("published_date", "")
+        snippet = (r.get("snippet") or "")[:600].replace("\n", " ")
+        date = r.get("date", "")
         out.append(f"{i}. **{title}**" + (f" ({date})" if date else ""))
         if url:
             out.append(f"   {url}")
@@ -112,6 +76,112 @@ def web_search_news(
             out.append(f"   {snippet}")
         out.append("")
     return "\n".join(out)
+
+
+def _search_brave(api_key: str, query: str, max_results: int) -> dict:
+    """Returns {ok: bool, items: list, error: str}. Items normalized to
+    {title, url, snippet, date}."""
+    import requests
+    try:
+        resp = requests.get(
+            "https://api.search.brave.com/res/v1/news/search",
+            headers={"Accept": "application/json", "X-Subscription-Token": api_key},
+            params={
+                "q": query,
+                "count": max(1, min(int(max_results), 20)),
+                "freshness": "pw",
+                "country": "us",
+                "safesearch": "off",
+            },
+            timeout=15,
+        )
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "items": [], "error": f"network: {e}"}
+    if resp.status_code != 200:
+        return {"ok": False, "items": [], "error": f"HTTP {resp.status_code} {resp.text[:160]}"}
+    try:
+        raw = resp.json().get("results", [])
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "items": [], "error": f"parse: {e}"}
+    items = [
+        {
+            "title": r.get("title", "(no title)"),
+            "url": r.get("url", ""),
+            "snippet": r.get("description") or "",
+            "date": r.get("age") or r.get("page_age") or "",
+        }
+        for r in raw
+    ]
+    return {"ok": True, "items": items, "error": ""}
+
+
+def _search_tavily(api_key: str, query: str, max_results: int) -> dict:
+    try:
+        from langchain_tavily import TavilySearch
+    except ImportError:
+        return {"ok": False, "items": [], "error": "langchain-tavily not installed"}
+    try:
+        search = TavilySearch(
+            max_results=max_results,
+            topic="news",
+            search_depth="advanced",
+            tavily_api_key=api_key,
+        )
+        result = search.invoke({"query": query})
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "items": [], "error": str(e)[:200]}
+    raw = result.get("results", []) if isinstance(result, dict) else result
+    items = [
+        {
+            "title": r.get("title", "(no title)"),
+            "url": r.get("url", ""),
+            "snippet": r.get("content") or "",
+            "date": r.get("published_date") or "",
+        }
+        for r in (raw or [])
+    ]
+    return {"ok": True, "items": items, "error": ""}
+
+
+@tool
+def web_search_news(
+    query: Annotated[str, "Search query (e.g. 'CRWV Q1 2026 earnings', 'NVDA Nvidia investment')"],
+    max_results: Annotated[int, "Maximum number of articles to return"] = 5,
+) -> str:
+    """
+    Live web news search — covers events that yfinance/alpha_vantage news APIs
+    miss (recent 8-K filings, credit rating actions, large strategic
+    investments, partnership announcements, late-breaking earnings reactions).
+    Use this whenever the structured news tools return stale or sparse results.
+
+    Tries Brave Search API first, falls back to Tavily on rate-limit / error.
+    Set either BRAVE_API_KEY or TAVILY_API_KEY (or both — recommended) in env.
+    """
+    providers = []
+    brave_key = os.environ.get("BRAVE_API_KEY")
+    if brave_key:
+        providers.append(("Brave", brave_key, _search_brave))
+    tavily_key = os.environ.get("TAVILY_API_KEY")
+    if tavily_key:
+        providers.append(("Tavily", tavily_key, _search_tavily))
+
+    if not providers:
+        return (
+            "[web_search_news unavailable: neither BRAVE_API_KEY nor TAVILY_API_KEY "
+            "set in env. Continue analysis with the structured news tools only.]"
+        )
+
+    errors: list[str] = []
+    for name, key, fn in providers:
+        result = fn(key, query, max_results)
+        if result["ok"] and result["items"]:
+            return _format_news_results(query, result["items"], max_results)
+        if result["ok"]:
+            errors.append(f"{name}: no results")
+        else:
+            errors.append(f"{name}: {result['error']}")
+
+    return f"[web_search_news exhausted: {'; '.join(errors)}]"
 
 
 @tool
