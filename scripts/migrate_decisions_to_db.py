@@ -68,16 +68,25 @@ def main() -> int:
     new_ticker_dirs = sorted(root.glob("new_ticker_*/"))
     print(f"Found {len(portfolio_dirs)} portfolio dirs, {len(new_ticker_dirs)} new-ticker dirs")
 
-    # For each ticker, keep only the most recent run (lexical sort = chronological
-    # since dirs end with YYYY-MM-DD_HHMMSS). Portfolio runs put JSONs under
-    # per_ticker/; new_ticker runs put a single TICKER.json at the dir root.
-    ticker_to_latest: dict[str, Path] = {}
+    # For each ticker, keep only the most recent run across BOTH dir kinds.
+    # Directory names end with YYYY-MM-DD_HHMMSS, so the trailing 17 chars sort
+    # chronologically and can be compared across portfolio_analysis_* and
+    # new_ticker_<SYM>_*.
+    def _dir_ts(p: Path) -> str:
+        return p.name[-17:]  # YYYY-MM-DD_HHMMSS
+
+    candidates: list[tuple[str, Path]] = []
     for d in portfolio_dirs:
         for jf in (d / "per_ticker").glob("*.json"):
-            ticker_to_latest[jf.stem] = jf  # later wins
+            candidates.append((_dir_ts(d), jf))
     for d in new_ticker_dirs:
         for jf in d.glob("*.json"):
-            ticker_to_latest[jf.stem] = jf  # later wins (across both dir kinds)
+            candidates.append((_dir_ts(d), jf))
+
+    candidates.sort(key=lambda x: x[0])  # chronological; later wins
+    ticker_to_latest: dict[str, Path] = {}
+    for _ts, jf in candidates:
+        ticker_to_latest[jf.stem] = jf
 
     print(f"Migrating {len(ticker_to_latest)} unique tickers (latest run per ticker)")
 
