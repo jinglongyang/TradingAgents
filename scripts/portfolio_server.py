@@ -2600,6 +2600,15 @@ RISK_FREE_RATE_ANNUAL = 0.045
 # contributes the same expected daily PnL swing.
 RISK_BUDGET_PER_POSITION_PCT = 1.0
 
+# Concentration alert thresholds (% of total portfolio value). Tunable; these
+# defaults are conservative-for-retail picks. Ticker 10% mirrors the SEC's
+# 13D ownership threshold as a rough "this is a big bet" gut check; sector
+# 35% catches an entire-portfolio tech tilt; owner 80% surfaces household
+# wealth concentration (one person holding ~all the money).
+CONCENTRATION_TICKER_MAX_PCT = 10.0
+CONCENTRATION_SECTOR_MAX_PCT = 35.0
+CONCENTRATION_OWNER_MAX_PCT = 80.0
+
 
 def _fetch_returns_matrix(symbols: list[str], days: int = 252) -> "pd.DataFrame | None":
     """Daily simple-return DataFrame for ``symbols`` over the last ``days``
@@ -2806,6 +2815,64 @@ def _compute_rating_calibration(by_rating: dict, windows: list[int]) -> dict:
     return calib
 
 
+def _compute_concentration_breaches() -> dict:
+    """Surface positions / sectors / owners that exceed configured caps.
+
+    Reads the most recent positions_snapshot, aggregates value three ways
+    (ticker, sector, owner), and returns the rows that breach the threshold
+    in each dimension, sorted by overshoot magnitude (worst first). The cap
+    is reported alongside so the template can render "actual / threshold"
+    without re-deriving constants."""
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT p.symbol, p.account_id, p.account_name, p.owner,
+                   COALESCE(t.last_price, p.last_price) * p.quantity AS value,
+                   t.sector AS sector
+            FROM positions_snapshot p
+            LEFT JOIN tickers t ON t.symbol = p.symbol
+            WHERE p.import_date = (SELECT MAX(import_date) FROM positions_snapshot)
+            """
+        ).fetchall()
+
+    total = sum((r["value"] or 0) for r in rows)
+    if total <= 0:
+        return {"ticker": [], "sector": [], "owner": [], "total": 0}
+
+    ticker_totals: dict[str, float] = {}
+    sector_totals: dict[str, float] = {}
+    owner_totals: dict[str, float] = {}
+    for r in rows:
+        v = r["value"] or 0
+        if v <= 0:
+            continue
+        ticker_totals[r["symbol"]] = ticker_totals.get(r["symbol"], 0) + v
+        sec = r["sector"] or "Unknown"
+        sector_totals[sec] = sector_totals.get(sec, 0) + v
+        owner_totals[r["owner"] or "—"] = owner_totals.get(r["owner"] or "—", 0) + v
+
+    def _breaches(buckets: dict[str, float], cap: float) -> list[dict]:
+        out = []
+        for name, value in buckets.items():
+            pct = value / total * 100
+            if pct > cap:
+                out.append({
+                    "name": name,
+                    "value": value,
+                    "pct": pct,
+                    "cap": cap,
+                    "overshoot": pct - cap,
+                })
+        return sorted(out, key=lambda x: -x["overshoot"])
+
+    return {
+        "ticker": _breaches(ticker_totals, CONCENTRATION_TICKER_MAX_PCT),
+        "sector": _breaches(sector_totals, CONCENTRATION_SECTOR_MAX_PCT),
+        "owner": _breaches(owner_totals, CONCENTRATION_OWNER_MAX_PCT),
+        "total": total,
+    }
+
+
 def _fetch_avg_dollar_volume(symbols: list[str], days: int = 20) -> dict[str, float]:
     """Average daily dollar volume = close × volume averaged over last ``days``
     trading days. Used to flag /today reduce/add sizes that are large relative
@@ -2878,10 +2945,68 @@ def _rank_with_ties(xs: list[float]) -> list[float]:
     return ranks
 
 
-def _compute_technicals() -> dict:
-    """Per-ticker technical snapshot: SMA50/200 cross, 52-week range.
+def _compute_rsi(close: "pd.Series", n: int = 14) -> float | None:
+    """Wilder-smoothed RSI(n). EWMA with alpha=1/n mirrors the original
+    Wilder average without storing the prior-day smoothing state."""
+    import math as _math
+    if len(close) < n + 1:
+        return None
+    delta = close.diff().dropna()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / n, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / n, adjust=False).mean()
+    last_loss = float(avg_loss.iloc[-1])
+    if last_loss == 0:
+        return 100.0
+    rs = float(avg_gain.iloc[-1]) / last_loss
+    rsi = 100 - 100 / (1 + rs)
+    return None if _math.isnan(rsi) else rsi
 
-    One yfinance batch fetches 1y of daily closes for every symbol in the
+
+def _compute_macd(close: "pd.Series") -> dict | None:
+    """Standard 12/26/9 MACD. Returns the latest values plus the prior bar's
+    histogram so the caller can tell if momentum is accelerating or decaying."""
+    import math as _math
+    if len(close) < 35:
+        return None
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    macd = ema12 - ema26
+    signal = macd.ewm(span=9, adjust=False).mean()
+    hist = macd - signal
+    last = float(hist.iloc[-1])
+    if _math.isnan(last):
+        return None
+    return {
+        "macd": float(macd.iloc[-1]),
+        "signal": float(signal.iloc[-1]),
+        "hist": last,
+        "prev_hist": float(hist.iloc[-2]) if len(hist) > 1 else None,
+    }
+
+
+def _compute_atr(high: "pd.Series", low: "pd.Series", close: "pd.Series", n: int = 14) -> float | None:
+    """Wilder ATR(n). Same Wilder-as-EWMA trick as _compute_rsi."""
+    import math as _math
+    import pandas as _pd
+    if len(close) < n + 1:
+        return None
+    prev_close = close.shift(1)
+    tr = _pd.concat(
+        [(high - low), (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1,
+    ).max(axis=1)
+    atr = tr.ewm(alpha=1 / n, adjust=False).mean()
+    last = float(atr.iloc[-1])
+    return None if _math.isnan(last) else last
+
+
+def _compute_technicals() -> dict:
+    """Per-ticker technical snapshot: SMA50/200 cross, 52-week range, plus
+    RSI(14) / MACD(12,26,9) / ATR(14).
+
+    One yfinance batch fetches 1y of daily OHLC for every symbol in the
     latest positions snapshot; everything else is pandas on that frame. Joined
     against the latest PM rating so conflicts (e.g. Overweight + death cross)
     surface in the same view."""
@@ -2911,11 +3036,22 @@ def _compute_technicals() -> dict:
     end = _date.today() + _td(days=1)
     start = end - _td(days=400)  # 400d buffer for 200 SMA + weekend gaps
     try:
-        data = _yf.download(symbols, start=start, end=end, progress=False, auto_adjust=True)["Close"]
+        raw = _yf.download(symbols, start=start, end=end, progress=False, auto_adjust=True)
     except Exception as e:
         return {"error": f"yfinance error: {e}", "items": [], "as_of": _date.today().isoformat()}
-    if isinstance(data, _pd.Series):
-        data = data.to_frame()
+    # yfinance returns a flat columns frame for one symbol, multi-index for
+    # multiple; normalize so per-symbol slicing is uniform downstream.
+    try:
+        close_df = raw["Close"]
+        high_df = raw["High"]
+        low_df = raw["Low"]
+    except Exception as e:
+        return {"error": f"yfinance shape error: {e}", "items": [], "as_of": _date.today().isoformat()}
+    if isinstance(close_df, _pd.Series):
+        close_df = close_df.to_frame(name=symbols[0])
+        high_df = high_df.to_frame(name=symbols[0])
+        low_df = low_df.to_frame(name=symbols[0])
+    data = close_df  # SMA/52w block downstream still calls this ``data``
 
     rows: list[dict] = []
     for sym in symbols:
@@ -2967,6 +3103,24 @@ def _compute_technicals() -> dict:
             elif rating in ("Underweight", "Sell") and sma50 > sma200:
                 conflict = "rating_vs_golden"
 
+        rsi = _compute_rsi(col)
+        macd = _compute_macd(col)
+        atr = None
+        atr_pct = None
+        if sym in high_df.columns and sym in low_df.columns:
+            atr = _compute_atr(high_df[sym].dropna(), low_df[sym].dropna(), col)
+            atr_pct = (atr / price * 100) if (atr is not None and price > 0) else None
+        macd_direction = None
+        if macd is not None:
+            if macd["prev_hist"] is None:
+                macd_direction = "flat"
+            elif macd["hist"] > macd["prev_hist"]:
+                macd_direction = "accelerating" if macd["hist"] > 0 else "decelerating_down"
+            elif macd["hist"] < macd["prev_hist"]:
+                macd_direction = "decelerating" if macd["hist"] > 0 else "accelerating_down"
+            else:
+                macd_direction = "flat"
+
         rows.append({
             "symbol": sym,
             "rating": rating,
@@ -2978,6 +3132,13 @@ def _compute_technicals() -> dict:
             "trend": "golden" if (sma50 and sma200 and sma50 > sma200) else (
                 "death" if (sma50 and sma200 and sma50 < sma200) else None
             ),
+            "rsi": rsi,
+            "rsi_zone": ("overbought" if rsi is not None and rsi > 70 else
+                         "oversold" if rsi is not None and rsi < 30 else
+                         "neutral" if rsi is not None else None),
+            "macd_hist": macd["hist"] if macd else None,
+            "macd_direction": macd_direction,
+            "atr_pct": atr_pct,
             "cross_days": cross_days,
             "w52_high": w_high,
             "w52_low": w_low,
@@ -3238,10 +3399,14 @@ def alerts_view():
     items.sort(key=lambda x: (_status_rank[x["status"]], x["symbol"]))
 
     counts = {k: sum(1 for it in items if it["status"] == k) for k in _status_rank}
+    concentration = _compute_concentration_breaches()
 
     return templates.TemplateResponse(
         _dummy_request(), "alerts.html",
-        {"css": CSS, "items": items, "counts": counts, "total": len(items)},
+        {
+            "css": CSS, "items": items, "counts": counts, "total": len(items),
+            "concentration": concentration,
+        },
     )
 
 

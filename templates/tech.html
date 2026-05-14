@@ -41,6 +41,9 @@
         <th>Ticker</th>
         <th>评级</th>
         <th class="num">价格</th>
+        <th class="num" title="14d Wilder RSI · >70 超买 / <30 超卖">RSI14</th>
+        <th class="num" title="MACD 柱状值 · 正=多头动能, 方向箭头看是否在加速">MACD</th>
+        <th class="num" title="14d ATR / 价格 · 一倍 ATR 大致是日内典型波幅，止损距离参考">ATR%</th>
         <th class="num">SMA50</th>
         <th class="num">SMA200</th>
         <th>趋势</th>
@@ -58,6 +61,27 @@
         <td><strong>{{ it.symbol }}</strong></td>
         <td>{% if it.rating %}<span class="tag tag-{{ it.rating|lower }}" style="padding:2px 8px;font-size:11px;">{{ it.rating }}</span>{% else %}—{% endif %}</td>
         <td class="num">${{ "%.2f"|format(it.price) }}</td>
+        <td class="num" style="{% if it.rsi_zone == 'overbought' %}color:var(--loss);font-weight:600;{% elif it.rsi_zone == 'oversold' %}color:var(--gain);font-weight:600;{% endif %}">
+          {% if it.rsi is not none %}
+            {{ "%.0f"|format(it.rsi) }}
+            {% if it.rsi_zone == 'overbought' %}<span style="font-size:10px;">🔴</span>
+            {% elif it.rsi_zone == 'oversold' %}<span style="font-size:10px;">🟢</span>{% endif %}
+          {% else %}—{% endif %}
+        </td>
+        <td class="num" style="font-size:11px;">
+          {% if it.macd_hist is not none %}
+            <span style="{% if it.macd_hist > 0 %}color:var(--gain);{% else %}color:var(--loss);{% endif %}font-weight:600;">
+              {{ "%+.2f"|format(it.macd_hist) }}
+            </span>
+            {% if it.macd_direction == 'accelerating' %}<span style="color:var(--gain);">▲▲</span>
+            {% elif it.macd_direction == 'decelerating' %}<span style="color:var(--gain);opacity:0.6;">▲</span>
+            {% elif it.macd_direction == 'accelerating_down' %}<span style="color:var(--loss);">▼▼</span>
+            {% elif it.macd_direction == 'decelerating_down' %}<span style="color:var(--loss);opacity:0.6;">▼</span>{% endif %}
+          {% else %}—{% endif %}
+        </td>
+        <td class="num" style="font-size:11px;color:var(--fg-muted);">
+          {% if it.atr_pct is not none %}{{ "%.1f"|format(it.atr_pct) }}%{% else %}—{% endif %}
+        </td>
         <td class="num">{% if it.sma50 %}${{ "%.2f"|format(it.sma50) }}{% else %}—{% endif %}</td>
         <td class="num">{% if it.sma200 %}${{ "%.2f"|format(it.sma200) }}{% else %}—{% endif %}</td>
         <td>

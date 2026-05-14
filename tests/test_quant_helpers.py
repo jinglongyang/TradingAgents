@@ -272,6 +272,119 @@ class TestVolTargets:
 
 
 # --------------------------------------------------------------------------
+# RSI / MACD / ATR — pure pandas indicators for /tech.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestIndicators:
+    def test_rsi_pure_uptrend_pegs_at_100(self):
+        # No losses → avg_loss=0 → guard returns 100 (instead of inf).
+        close = pd.Series([100 + i for i in range(30)])
+        assert ps._compute_rsi(close) == pytest.approx(100.0)
+
+    def test_rsi_pure_downtrend_pegs_at_zero(self):
+        close = pd.Series([100 - i for i in range(30)])
+        rsi = ps._compute_rsi(close)
+        assert rsi is not None
+        assert rsi == pytest.approx(0.0, abs=0.01)
+
+    def test_rsi_returns_none_when_too_short(self):
+        assert ps._compute_rsi(pd.Series([100, 101, 102])) is None
+
+    def test_macd_hist_positive_in_uptrend(self):
+        close = pd.Series([100 + i * 0.5 for i in range(50)])
+        out = ps._compute_macd(close)
+        assert out is not None
+        assert out["hist"] > 0
+        assert out["macd"] > out["signal"]
+
+    def test_macd_returns_none_when_too_short(self):
+        assert ps._compute_macd(pd.Series([100] * 20)) is None
+
+    def test_atr_zero_when_flat(self):
+        flat = pd.Series([100.0] * 30)
+        assert ps._compute_atr(flat, flat, flat) == pytest.approx(0.0)
+
+    def test_atr_increases_with_range(self):
+        close = pd.Series([100.0] * 30)
+        narrow = ps._compute_atr(close * 1.01, close * 0.99, close)
+        wide = ps._compute_atr(close * 1.05, close * 0.95, close)
+        assert wide > narrow > 0
+
+
+# --------------------------------------------------------------------------
+# _compute_concentration_breaches — DB-backed; we patch connect() to a
+# fixture so the test stays hermetic.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestConcentrationBreaches:
+    @staticmethod
+    def _stub_connect(rows: list[dict]):
+        """Return a context-manager factory whose .execute(...).fetchall()
+        yields ``rows`` — matches the sqlite3 row-as-dict interface our code
+        consumes via __getitem__."""
+        class _Cursor:
+            def fetchall(self):
+                return rows
+
+        class _Conn:
+            def execute(self, *_args, **_kw):
+                return _Cursor()
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+
+        return lambda: _Conn()
+
+    def test_ticker_breach_only_when_over_cap(self, monkeypatch):
+        rows = [
+            {"symbol": "BIG",    "account_id": "a1", "account_name": "A", "owner": "Self", "value": 30_000, "sector": "Tech"},
+            {"symbol": "SMALL1", "account_id": "a1", "account_name": "A", "owner": "Self", "value": 5_000,  "sector": "Tech"},
+            {"symbol": "SMALL2", "account_id": "a1", "account_name": "A", "owner": "Self", "value": 5_000,  "sector": "Health"},
+        ]
+        # Total 40k. BIG = 75% (breach @10), SMALLs = 12.5% each (breach @10).
+        monkeypatch.setattr(ps, "connect", self._stub_connect(rows))
+        out = ps._compute_concentration_breaches()
+        names = {b["name"] for b in out["ticker"]}
+        assert names == {"BIG", "SMALL1", "SMALL2"}
+        # Sorted by overshoot desc.
+        assert out["ticker"][0]["name"] == "BIG"
+        assert out["ticker"][0]["overshoot"] == pytest.approx(65.0, abs=0.1)
+
+    def test_sector_breach_aggregates_across_tickers(self, monkeypatch):
+        # Tech sector aggregates BIG + SMALL1 = 35k = 87.5% > 35% cap.
+        rows = [
+            {"symbol": "BIG",    "account_id": "a1", "account_name": "A", "owner": "Self", "value": 30_000, "sector": "Tech"},
+            {"symbol": "SMALL1", "account_id": "a1", "account_name": "A", "owner": "Self", "value": 5_000,  "sector": "Tech"},
+            {"symbol": "DEF",    "account_id": "a1", "account_name": "A", "owner": "Self", "value": 5_000,  "sector": "Defense"},
+        ]
+        monkeypatch.setattr(ps, "connect", self._stub_connect(rows))
+        out = ps._compute_concentration_breaches()
+        assert len(out["sector"]) == 1
+        assert out["sector"][0]["name"] == "Tech"
+        assert out["sector"][0]["pct"] == pytest.approx(87.5)
+
+    def test_empty_snapshot_returns_empty_buckets(self, monkeypatch):
+        monkeypatch.setattr(ps, "connect", self._stub_connect([]))
+        out = ps._compute_concentration_breaches()
+        assert out == {"ticker": [], "sector": [], "owner": [], "total": 0}
+
+    def test_owner_breach_when_one_owner_holds_most(self, monkeypatch):
+        rows = [
+            {"symbol": "A", "account_id": "a1", "account_name": "Self acct",   "owner": "Self",   "value": 85_000, "sector": "Tech"},
+            {"symbol": "B", "account_id": "a2", "account_name": "Spouse acct", "owner": "Spouse", "value": 15_000, "sector": "Tech"},
+        ]
+        monkeypatch.setattr(ps, "connect", self._stub_connect(rows))
+        out = ps._compute_concentration_breaches()
+        # Tech sector = 100% > 35% → also breaches sector.
+        assert out["owner"][0]["name"] == "Self"
+        assert out["owner"][0]["pct"] == pytest.approx(85.0)
+        assert any(b["name"] == "Tech" for b in out["sector"])
+
+
+# --------------------------------------------------------------------------
 # _fetch_avg_dollar_volume — guard rails only (deterministic content path
 # would require mocking the full yfinance multi-index DataFrame which is
 # more brittle than the math it tests).

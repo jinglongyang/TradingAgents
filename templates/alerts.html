@@ -28,6 +28,12 @@
         ✓ 正常: {{ counts.ok }}
       </span>
     {% endif %}
+    {% set _conc_n = (concentration.ticker|length) + (concentration.sector|length) + (concentration.owner|length) %}
+    {% if _conc_n %}
+      <span class="tag" style="background:#dc2626;color:white;padding:4px 10px;font-size:12px;margin-left:6px;">
+        📊 集中度: {{ _conc_n }}
+      </span>
+    {% endif %}
   </div>
 
   <div style="margin-bottom:16px;">
@@ -38,6 +44,40 @@
       <button class="btn secondary" type="submit">🔄 刷新价格</button>
     </form>
   </div>
+
+  {% set total_breaches = (concentration.ticker|length) + (concentration.sector|length) + (concentration.owner|length) %}
+  {% if total_breaches %}
+  <h2 style="font-size:16px;margin-top:14px;">📊 集中度告警 ({{ total_breaches }})</h2>
+  <p style="font-size:12px;color:var(--fg-muted);margin-top:0;">
+    超过预设阈值的 ticker / 板块 / owner。单股 >{{ "%.0f"|format(concentration.ticker[0].cap if concentration.ticker else 10) }}%、板块 >35%、owner >80% 触发。
+  </p>
+  <table style="background:var(--bg-subtle);border-radius:8px;border:1px solid var(--border);overflow:hidden;margin-bottom:24px;">
+    <thead>
+      <tr>
+        <th>类型</th>
+        <th>名称</th>
+        <th class="num">实际 %</th>
+        <th class="num">阈值</th>
+        <th class="num">超出</th>
+        <th class="num">$ 价值</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for kind, label, items in [('ticker', '🎯 单股', concentration.ticker), ('sector', '🏭 板块', concentration.sector), ('owner', '👤 Owner', concentration.owner)] %}
+        {% for b in items %}
+        <tr style="background:rgba(239,68,68,0.05);">
+          <td style="font-size:12px;">{{ label }}</td>
+          <td><strong>{{ b.name }}</strong></td>
+          <td class="num" style="color:var(--loss);font-weight:600;">{{ "%.1f"|format(b.pct) }}%</td>
+          <td class="num" style="color:var(--fg-muted);">{{ "%.0f"|format(b.cap) }}%</td>
+          <td class="num" style="color:var(--loss);">+{{ "%.1f"|format(b.overshoot) }}pp</td>
+          <td class="num">${{ "{:,.0f}".format(b.value) }}</td>
+        </tr>
+        {% endfor %}
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
 
   {% if not items %}
     <p style="color:var(--fg-muted);">没有带 stop_loss / price_target 的决策。可能 PM 在 final_decision 里没明确给出。</p>
