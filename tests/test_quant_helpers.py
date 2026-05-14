@@ -385,6 +385,33 @@ class TestConcentrationBreaches:
 
 
 # --------------------------------------------------------------------------
+# _compute_momentum_12_1 — 12-1m compounded return, skipping the last 21
+# trading days to dodge short-term reversal.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestMomentum12_1:
+    def test_window_excludes_last_21_days(self, monkeypatch):
+        # 100 days of +1% per day, then 21 days of -10% per day. If we used
+        # the full window, AAA would look terrible; with 12-1 skip, the recent
+        # crash is dropped and only the +1% earlier window contributes.
+        n = 100
+        early = [0.01] * n
+        recent = [-0.10] * 21
+        idx = pd.date_range("2025-01-02", periods=n + 21, freq="B")
+        rets = pd.DataFrame({"AAA": early + recent}, index=idx)
+        monkeypatch.setattr(ps, "_fetch_returns_matrix", lambda s, days=252: rets)
+        out = ps._compute_momentum_12_1(["AAA"])
+        # 100 days × +1% compounded ≈ 1.01^100 - 1 ≈ 1.7048
+        assert out["AAA"] == pytest.approx(1.01 ** 100 - 1, rel=0.01)
+
+    def test_returns_empty_when_fetch_fails(self, monkeypatch):
+        monkeypatch.setattr(ps, "_fetch_returns_matrix", lambda s, days=252: None)
+        assert ps._compute_momentum_12_1(["AAA"]) == {}
+
+
+# --------------------------------------------------------------------------
 # _fetch_avg_dollar_volume — guard rails only (deterministic content path
 # would require mocking the full yfinance multi-index DataFrame which is
 # more brittle than the math it tests).

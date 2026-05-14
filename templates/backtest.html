@@ -62,6 +62,48 @@
     </tbody>
   </table>
 
+  <h2 style="font-size:16px;margin-top:20px;">PIT 调整收益 (Walk-Forward Exit)</h2>
+  <p style="font-size:12px;color:var(--fg-muted);margin-top:0;">
+    Naive 是"持有到 N 天"的简化回测；PIT 模拟逐日 OHLC 检查 stop/target，触发则提前退出 — 更接近真实交易的成交价。
+    Stop% / Target% 是该评级桶里触发提前退出的比例（无 stop_loss/price_target 的决策只能持到期）。
+  </p>
+  <table style="background:var(--bg-subtle);border-radius:8px;border:1px solid var(--border);overflow:hidden;margin-bottom:20px;">
+    <thead>
+      <tr>
+        <th>评级</th>
+        {% for n in bt.windows %}
+        <th class="num">{{ n }}d 平均</th>
+        <th class="num">{{ n }}d 胜率</th>
+        <th class="num">{{ n }}d α</th>
+        <th class="num">{{ n }}d Stop%</th>
+        <th class="num">{{ n }}d Target%</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for rating in rating_order %}
+        {% set agg = bt.by_rating[rating] %}
+        {% if agg and agg.n %}
+        <tr>
+          <td><span class="tag tag-{{ rating|lower }}" style="padding:3px 10px;">{{ rating }}</span></td>
+          {% for n in bt.windows %}
+            {% set pmr = agg['pit_mean_r' ~ n] %}
+            {% set pwr = agg['pit_win_r' ~ n] %}
+            {% set pma = agg['pit_mean_a' ~ n] %}
+            {% set psp = agg['pit_stop_pct' ~ n] %}
+            {% set ptp = agg['pit_target_pct' ~ n] %}
+            <td class="num" style="{% if pmr is not none and pmr > 0 %}color:var(--gain);{% elif pmr is not none and pmr < 0 %}color:var(--loss);{% endif %}">{{ pct(pmr) }}</td>
+            <td class="num">{{ winrate(pwr) }}</td>
+            <td class="num" style="{% if pma is not none and pma > 0 %}color:var(--gain);font-weight:600;{% elif pma is not none and pma < 0 %}color:var(--loss);font-weight:600;{% endif %}">{{ pct(pma) }}</td>
+            <td class="num" style="color:var(--loss);font-size:12px;">{{ winrate(psp) }}</td>
+            <td class="num" style="color:var(--gain);font-size:12px;">{{ winrate(ptp) }}</td>
+          {% endfor %}
+        </tr>
+        {% endif %}
+      {% endfor %}
+    </tbody>
+  </table>
+
   {% if bt.calibration %}
   <h2 style="font-size:16px;margin-top:24px;">评级校准 (Rating Calibration)</h2>
   <p style="font-size:12px;color:var(--fg-muted);margin-top:0;">

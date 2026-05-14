@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}多因子暴露 — Portfolio Manager{% endblock %}
+
+{% macro z(v) -%}
+  {%- if v is none -%}—{%- else -%}{{ "%+.2f"|format(v) }}σ{%- endif -%}
+{%- endmacro %}
+
+{% macro tilt_color(v) -%}
+  {%- if v is none -%}var(--fg-muted)
+  {%- elif v > 0.3 -%}var(--gain)
+  {%- elif v < -0.3 -%}var(--loss)
+  {%- else -%}var(--fg-muted)
+  {%- endif -%}
+{%- endmacro %}
+
+{% block content %}
+  <h1>🧮 多因子暴露</h1>
+  <p class="subtitle">
+    五个经典因子的横截面 z-score（仅在当前组合内归一化，不是全市场基准）。
+    组合层面是 $ 加权平均。截至 {{ fx.as_of }} · {{ fx.n_total }} 个 ticker。
+  </p>
+
+  <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:18px;">
+    {% for fname, label, hint in [
+      ('momentum', '动能 (12-1m)', '过去 12 个月收益减去最近 1 个月。正=趋势延续 prior'),
+      ('low_vol', '低波动 (60d)', '−年化σ。正=组合偏好低波动'),
+      ('size', '小盘 (−log MCap)', '−log10(市值)。正=组合偏小盘'),
+      ('value', '价值 (1/PE)', '1/PE。正=组合偏便宜'),
+      ('quality', '质量 (ROE − D/E)', 'ROE 减杠杆惩罚。正=组合偏盈利能力强、负债低'),
+    ] %}
+    <div style="background:var(--bg-subtle);padding:12px 16px;border-radius:8px;border:1px solid var(--border);min-width:140px;" title="{{ hint }}">
+      <div style="font-size:11px;color:var(--fg-muted);">{{ label }}</div>
+      <div style="font-size:22px;font-weight:600;color:{{ tilt_color(fx.portfolio[fname]) }};">
+        {{ z(fx.portfolio[fname]) }}
+      </div>
+      <div style="font-size:10px;color:var(--fg-muted);">{{ fx.coverage[fname] }} 覆盖</div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <div style="margin-bottom:14px;">
+    <a class="btn secondary" href="/">← 回到持仓</a>
+    <a class="btn secondary" href="/today">🎯 今日执行</a>
+    <a class="btn secondary" href="/tech">📈 技术面</a>
+    <a class="btn secondary" href="/sectors">🏭 板块</a>
+    <form method="post" action="/enrich-tickers" style="display:inline;margin:0;">
+      <button class="btn secondary" type="submit" title="重新拉 PE/PB/ROE/D/E from yfinance">🔄 刷新基本面</button>
+    </form>
+  </div>
+
+  <table style="background:var(--bg-subtle);border-radius:8px;border:1px solid var(--border);overflow:hidden;">
+    <thead>
+      <tr>
+        <th>Ticker</th>
+        <th class="num">权重</th>
+        <th class="num" title="动能：12-1m 收益">动能 z</th>
+        <th class="num" title="低波动：−60d σ">低波 z</th>
+        <th class="num" title="小盘：−log MCap">小盘 z</th>
+        <th class="num" title="价值：1/PE">价值 z</th>
+        <th class="num" title="质量：ROE − D/E">质量 z</th>
+        <th class="num" style="color:var(--fg-muted);">12-1m</th>
+        <th class="num" style="color:var(--fg-muted);">σ</th>
+        <th class="num" style="color:var(--fg-muted);">MCap</th>
+        <th class="num" style="color:var(--fg-muted);">PE</th>
+        <th class="num" style="color:var(--fg-muted);">ROE</th>
+        <th class="num" style="color:var(--fg-muted);">D/E</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in fx.rows %}
+      <tr>
+        <td><strong>{{ r.symbol }}</strong></td>
+        <td class="num">{{ "%.1f"|format(r.weight * 100) }}%</td>
+        <td class="num" style="color:{{ tilt_color(r.momentum_z) }};">{{ z(r.momentum_z) }}</td>
+        <td class="num" style="color:{{ tilt_color(r.low_vol_z) }};">{{ z(r.low_vol_z) }}</td>
+        <td class="num" style="color:{{ tilt_color(r.size_z) }};">{{ z(r.size_z) }}</td>
+        <td class="num" style="color:{{ tilt_color(r.value_z) }};">{{ z(r.value_z) }}</td>
+        <td class="num" style="color:{{ tilt_color(r.quality_z) }};">{{ z(r.quality_z) }}</td>
+        <td class="num" style="font-size:11px;color:var(--fg-muted);">
+          {% if r.momentum_raw is not none %}{{ "%+.0f"|format(r.momentum_raw * 100) }}%{% else %}—{% endif %}
+        </td>
+        <td class="num" style="font-size:11px;color:var(--fg-muted);">
+          {% if r.vol_raw is not none %}{{ "%.0f"|format(r.vol_raw * 100) }}%{% else %}—{% endif %}
+        </td>
+        <td class="num" style="font-size:11px;color:var(--fg-muted);">
+          {% if r.market_cap %}${{ "%.0f"|format(r.market_cap / 1e9) }}B{% else %}—{% endif %}
+        </td>
+        <td class="num" style="font-size:11px;color:var(--fg-muted);">
+          {% if r.pe_ratio %}{{ "%.1f"|format(r.pe_ratio) }}{% else %}—{% endif %}
+        </td>
+        <td class="num" style="font-size:11px;color:var(--fg-muted);">
+          {% if r.roe is not none %}{{ "%.0f"|format(r.roe * 100) }}%{% else %}—{% endif %}
+        </td>
+        <td class="num" style="font-size:11px;color:var(--fg-muted);">
+          {% if r.debt_to_equity is not none %}{{ "%.0f"|format(r.debt_to_equity) }}{% else %}—{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endblock %}

@@ -568,6 +568,58 @@ def _fetch_next_earnings(t) -> str | None:
     return min(candidates).isoformat() if candidates else None
 
 
+def _persist_earnings_surprises(sym: str, t) -> int:
+    """Pull the last ~2 years of quarterly earnings actual/estimate/surprise
+    from ``t.earnings_dates`` and upsert into ``earnings_surprises``.
+
+    yfinance returns a DataFrame indexed by report timestamp with columns
+    "EPS Estimate" / "Reported EPS" / "Surprise(%)". Past rows have actuals;
+    future rows are NaN for actual/surprise. We only persist rows where
+    actual is present so the table reflects reported history."""
+    try:
+        ed = t.earnings_dates
+    except Exception:
+        return 0
+    if ed is None or ed.empty:
+        return 0
+
+    persisted = 0
+    with connect() as conn:
+        for ts, row in ed.iterrows():
+            actual = row.get("Reported EPS") or row.get("EPS Actual")
+            estimate = row.get("EPS Estimate")
+            surprise = row.get("Surprise(%)")
+            # Skip unreported quarters (NaN actual).
+            try:
+                if actual is None or (isinstance(actual, float) and actual != actual):
+                    continue
+            except Exception:
+                continue
+            try:
+                report_date = ts.date().isoformat() if hasattr(ts, "date") else str(ts)[:10]
+            except Exception:
+                continue
+            conn.execute(
+                """
+                INSERT INTO earnings_surprises (symbol, report_date, eps_actual, eps_estimate, surprise_pct, updated_at)
+                VALUES (?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(symbol, report_date) DO UPDATE SET
+                    eps_actual = excluded.eps_actual,
+                    eps_estimate = excluded.eps_estimate,
+                    surprise_pct = excluded.surprise_pct,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    sym, report_date,
+                    float(actual) if actual is not None else None,
+                    float(estimate) if estimate is not None and estimate == estimate else None,
+                    float(surprise) if surprise is not None and surprise == surprise else None,
+                ),
+            )
+            persisted += 1
+    return persisted
+
+
 def _enrich_worker(targets: list[str]) -> None:
     """Background worker: pulls metadata for the given tickers one by one.
 
@@ -577,6 +629,9 @@ def _enrich_worker(targets: list[str]) -> None:
     yfinance's .info omits beta for ETFs and some micro-caps. When that
     happens, fall back to a 6-month linear regression of the ticker's daily
     returns against SPY so portfolio-level β coverage stays high.
+
+    Also pulls value/quality fundamentals (PE, PB, ROE, D/E) and the
+    quarterly earnings surprise history.
     """
     import yfinance as _yf
     import numpy as _np
@@ -606,6 +661,10 @@ def _enrich_worker(targets: list[str]) -> None:
                     except Exception:
                         pass
                 earnings_date = _fetch_next_earnings(t)
+                pe = info.get("trailingPE") or info.get("forwardPE")
+                pb = info.get("priceToBook")
+                roe = info.get("returnOnEquity")
+                de = info.get("debtToEquity")
                 with connect() as conn:
                     conn.execute(
                         """
@@ -616,7 +675,11 @@ def _enrich_worker(targets: list[str]) -> None:
                             market_cap = COALESCE(?, market_cap),
                             beta = COALESCE(?, beta),
                             earnings_date = ?,
-                            earnings_updated_at = datetime('now')
+                            earnings_updated_at = datetime('now'),
+                            pe_ratio = COALESCE(?, pe_ratio),
+                            pb_ratio = COALESCE(?, pb_ratio),
+                            roe = COALESCE(?, roe),
+                            debt_to_equity = COALESCE(?, debt_to_equity)
                         WHERE symbol = ?
                         """,
                         (
@@ -626,9 +689,18 @@ def _enrich_worker(targets: list[str]) -> None:
                             info.get("marketCap"),
                             beta,
                             earnings_date,
+                            float(pe) if pe is not None else None,
+                            float(pb) if pb is not None else None,
+                            float(roe) if roe is not None else None,
+                            float(de) if de is not None else None,
                             sym,
                         ),
                     )
+                # Earnings surprise history — best effort, never fails the row.
+                try:
+                    _persist_earnings_surprises(sym, t)
+                except Exception:
+                    pass
             except Exception:
                 with _enrich_lock:
                     _enrich_state["failed"].append(sym)
@@ -660,7 +732,10 @@ def enrich_tickers():
 
     with connect() as conn:
         rows = conn.execute(
-            "SELECT symbol FROM tickers WHERE sector IS NULL OR name IS NULL OR beta IS NULL ORDER BY symbol"
+            "SELECT symbol FROM tickers "
+            "WHERE sector IS NULL OR name IS NULL OR beta IS NULL "
+            "   OR pe_ratio IS NULL OR pb_ratio IS NULL OR roe IS NULL "
+            "ORDER BY symbol"
         ).fetchall()
         targets = [r["symbol"] for r in rows]
 
@@ -2815,6 +2890,141 @@ def _compute_rating_calibration(by_rating: dict, windows: list[int]) -> dict:
     return calib
 
 
+def _compute_momentum_12_1(symbols: list[str]) -> dict[str, float]:
+    """12-1 month momentum: return from ~252 trading days ago to ~21 days ago,
+    *excluding* the last 21 days. Skipping the most recent month avoids the
+    well-known short-term reversal effect that contaminates a raw 12m return.
+
+    Uses the existing returns matrix cache for cheap reuse alongside the
+    /today σ/Sharpe and vol-target computations."""
+    rets = _fetch_returns_matrix(symbols, days=252)
+    if rets is None or rets.empty:
+        return {}
+    if len(rets) < 60:
+        return {}
+
+    # Window: drop the last 21 daily returns, then compound the rest.
+    window = rets.iloc[:-21] if len(rets) > 21 else rets
+    if window.empty:
+        return {}
+    out: dict[str, float] = {}
+    for sym in symbols:
+        if sym not in window.columns:
+            continue
+        col = window[sym].dropna()
+        if len(col) < 30:
+            continue
+        compound = float((1 + col).prod() - 1)
+        out[sym] = compound
+    return out
+
+
+def _compute_factor_exposure(symbols: list[str], weights: dict[str, float]) -> dict:
+    """Per-ticker factor scores + portfolio-weighted tilts.
+
+    Five factors:
+      momentum  — 12-1 month return (price only, this module)
+      low_vol   — −σ_60d (negated so "high score = low vol")
+      size      — −log10(marketCap) (negated so "high score = small cap")
+      value     — 1/PE (higher = cheaper)
+      quality   — ROE − (D/E ÷ 100) (combines profitability with leverage drag)
+
+    Returns:
+      rows: per-ticker dict of raw values + z-scores
+      portfolio: weighted-average z-score per factor (the "tilts")
+      coverage: how many tickers had data for each factor
+    """
+    import math as _math
+
+    momentum = _compute_momentum_12_1(symbols)
+    vol_targets = _compute_vol_targets(symbols, portfolio_total=100_000)  # total only affects $ size; we use vol_annual
+
+    fundamentals: dict[str, dict] = {}
+    with connect() as conn:
+        for r in conn.execute(
+            "SELECT symbol, market_cap, pe_ratio, pb_ratio, roe, debt_to_equity FROM tickers"
+        ).fetchall():
+            fundamentals[r["symbol"]] = dict(r)
+
+    rows: list[dict] = []
+    for sym in symbols:
+        fd = fundamentals.get(sym, {})
+        mom = momentum.get(sym)
+        vol = vol_targets.get(sym, {}).get("vol_annual") if vol_targets.get(sym) else None
+        mc = fd.get("market_cap")
+        pe = fd.get("pe_ratio")
+        roe = fd.get("roe")
+        de = fd.get("debt_to_equity")
+
+        # Derived scores — see docstring above for the rationale per signal.
+        low_vol_score = -vol if vol is not None else None
+        size_score = -_math.log10(mc) if (mc and mc > 0) else None
+        value_score = (1.0 / pe) if (pe and pe > 0) else None
+        # D/E reported in % by yfinance (e.g. 50 = 50%); rescale before mixing.
+        quality_score = roe - (de / 100.0) if (roe is not None and de is not None) else (
+            roe if roe is not None else None
+        )
+
+        rows.append({
+            "symbol": sym,
+            "weight": weights.get(sym, 0.0),
+            "momentum_raw": mom,
+            "vol_raw": vol,
+            "low_vol_score": low_vol_score,
+            "market_cap": mc,
+            "size_score": size_score,
+            "pe_ratio": pe,
+            "value_score": value_score,
+            "roe": roe,
+            "debt_to_equity": de,
+            "quality_score": quality_score,
+        })
+
+    # Cross-sectional z-scores within this portfolio. A factor's column is
+    # standardised independently — large-cap NVDA's "−1.5 size z" is "smaller
+    # than the portfolio average" not "smaller than the S&P 500."
+    factor_cols = {
+        "momentum": "momentum_raw",
+        "low_vol": "low_vol_score",
+        "size": "size_score",
+        "value": "value_score",
+        "quality": "quality_score",
+    }
+    portfolio_tilts: dict[str, float | None] = {}
+    coverage: dict[str, int] = {}
+    for fname, raw_key in factor_cols.items():
+        vals = [(r["symbol"], r[raw_key], r["weight"]) for r in rows if r[raw_key] is not None]
+        coverage[fname] = len(vals)
+        if len(vals) < 3:
+            portfolio_tilts[fname] = None
+            for r in rows:
+                r[f"{fname}_z"] = None
+            continue
+        xs = [v[1] for v in vals]
+        mean = sum(xs) / len(xs)
+        var = sum((x - mean) ** 2 for x in xs) / len(xs)
+        sd = _math.sqrt(var) if var > 0 else 0.0
+        z_by_sym: dict[str, float] = {}
+        for sym, x, _w in vals:
+            z_by_sym[sym] = ((x - mean) / sd) if sd > 0 else 0.0
+        for r in rows:
+            r[f"{fname}_z"] = z_by_sym.get(r["symbol"])
+        # Weighted tilt: dollar-weighted mean z (covered names only, renormalized).
+        w_sum = sum(w for _, _, w in vals)
+        if w_sum > 0:
+            portfolio_tilts[fname] = sum(z_by_sym[s] * w for s, _, w in vals) / w_sum
+        else:
+            portfolio_tilts[fname] = None
+
+    rows.sort(key=lambda r: -(r["weight"] or 0))
+    return {
+        "rows": rows,
+        "portfolio": portfolio_tilts,
+        "coverage": coverage,
+        "n_total": len(rows),
+    }
+
+
 def _compute_concentration_breaches() -> dict:
     """Surface positions / sectors / owners that exceed configured caps.
 
@@ -3028,7 +3238,19 @@ def _compute_technicals() -> dict:
             JOIN latest l ON l.symbol = d.symbol AND l.d = d.trade_date
             """
         ).fetchall()
+        # Last 4 quarters of earnings surprises per symbol — surfaces a
+        # beat/miss streak alongside the trend signals.
+        surprise_rows = conn.execute(
+            """
+            SELECT symbol, report_date, eps_actual, eps_estimate, surprise_pct
+            FROM earnings_surprises
+            ORDER BY symbol, report_date DESC
+            """
+        ).fetchall()
     rating_by_sym = {r["symbol"]: (r["rating"], r["trade_date"]) for r in rating_rows}
+    surprises_by_sym: dict[str, list[dict]] = {}
+    for r in surprise_rows:
+        surprises_by_sym.setdefault(r["symbol"], []).append(dict(r))
 
     if not symbols:
         return {"rows": [], "as_of": _date.today().isoformat()}
@@ -3103,6 +3325,20 @@ def _compute_technicals() -> dict:
             elif rating in ("Underweight", "Sell") and sma50 > sma200:
                 conflict = "rating_vs_golden"
 
+        # Last-4-quarter beat/miss compact summary. Streak chars: B/M/—.
+        surprises = surprises_by_sym.get(sym, [])[:4]
+        beat_streak = []
+        for s in surprises:
+            sp = s.get("surprise_pct")
+            if sp is None:
+                beat_streak.append("—")
+            elif sp > 0:
+                beat_streak.append("B")
+            else:
+                beat_streak.append("M")
+        last_surprise = surprises[0]["surprise_pct"] if surprises else None
+        last_surprise_date = surprises[0]["report_date"] if surprises else None
+
         rsi = _compute_rsi(col)
         macd = _compute_macd(col)
         atr = None
@@ -3139,6 +3375,10 @@ def _compute_technicals() -> dict:
             "macd_hist": macd["hist"] if macd else None,
             "macd_direction": macd_direction,
             "atr_pct": atr_pct,
+            "last_eps_surprise": last_surprise,
+            "last_eps_surprise_date": last_surprise_date,
+            "beat_streak": beat_streak,
+            "n_surprises": len(surprises),
             "cross_days": cross_days,
             "w52_high": w_high,
             "w52_low": w_low,
@@ -3200,7 +3440,7 @@ def _compute_backtest(windows: list[int]) -> dict:
 
     with connect() as conn:
         decisions = conn.execute(
-            "SELECT trade_date, symbol, rating FROM decisions"
+            "SELECT trade_date, symbol, rating, final_decision FROM decisions"
         ).fetchall()
     if not decisions:
         return {"rows": [], "by_rating": {}, "n_total": 0, "windows": windows, "as_of": None}
@@ -3213,13 +3453,26 @@ def _compute_backtest(windows: list[int]) -> dict:
     end = _date.today() + _td(days=1)
 
     try:
-        data = _yf.download(symbols, start=start, end=end, progress=False, auto_adjust=True)["Close"]
+        raw = _yf.download(symbols, start=start, end=end, progress=False, auto_adjust=True)
     except Exception as e:
         return {"error": f"yfinance error: {e}", "rows": [], "by_rating": {}, "n_total": 0, "windows": windows}
 
+    try:
+        data = raw["Close"]
+        high_df = raw["High"]
+        low_df = raw["Low"]
+    except Exception as e:
+        return {"error": f"yfinance shape error: {e}", "rows": [], "by_rating": {}, "n_total": 0, "windows": windows}
+
     if isinstance(data, _pd.Series):
-        data = data.to_frame()
+        data = data.to_frame(name=symbols[0])
+        high_df = high_df.to_frame(name=symbols[0])
+        low_df = low_df.to_frame(name=symbols[0])
     data.index = data.index.tz_localize(None) if data.index.tz else data.index
+    if high_df.index.tz is not None:
+        high_df.index = high_df.index.tz_localize(None)
+    if low_df.index.tz is not None:
+        low_df.index = low_df.index.tz_localize(None)
 
     def _entry_idx(idx: _pd.DatetimeIndex, td: str) -> int | None:
         """First trading day at or after td."""
@@ -3240,16 +3493,71 @@ def _compute_backtest(windows: list[int]) -> dict:
         p1 = float(col.iloc[i0 + n])
         return (p1 / p0 - 1) if p0 > 0 else None
 
+    def _pit_return(sym: str, td: str, n: int, rating: str,
+                    stop_loss: float | None, price_target: float | None) -> tuple[float | None, str | None]:
+        """Walk-forward exit simulation. Same horizon as _fwd_return but with
+        intraday stop / target triggers in the OHLC. Returns (effective return,
+        exit reason ∈ {stop, target, horizon}). Falls back to horizon close
+        when no levels are set so coverage stays high."""
+        if sym not in data.columns:
+            return None, None
+        col = data[sym].dropna()
+        if col.empty:
+            return None, None
+        i0 = _entry_idx(col.index, td)
+        if i0 is None or i0 + n >= len(col):
+            return None, None
+        entry = float(col.iloc[i0])
+        if entry <= 0:
+            return None, None
+
+        bullish = rating in ("Buy", "Overweight")
+        bearish = rating in ("Sell", "Underweight")
+        if not (bullish or bearish):
+            # Hold / unknown ratings — no exit logic to apply.
+            return _fwd_return(sym, td, n), "horizon"
+
+        for k in range(1, n + 1):
+            day = col.index[i0 + k]
+            try:
+                h = high_df.at[day, sym] if sym in high_df.columns else None
+                l = low_df.at[day, sym] if sym in low_df.columns else None
+            except (KeyError, AttributeError):
+                continue
+            if h is None or l is None or _pd.isna(h) or _pd.isna(l):
+                continue
+            h_v, l_v = float(h), float(l)
+            if bullish:
+                if stop_loss is not None and l_v <= stop_loss:
+                    return (stop_loss / entry - 1, "stop")
+                if price_target is not None and h_v >= price_target:
+                    return (price_target / entry - 1, "target")
+            else:  # bearish
+                if stop_loss is not None and h_v >= stop_loss:
+                    return (stop_loss / entry - 1, "stop")
+                if price_target is not None and l_v <= price_target:
+                    return (price_target / entry - 1, "target")
+
+        # No intraday trigger → exit at horizon close.
+        exit_price = float(col.iloc[i0 + n])
+        return (exit_price / entry - 1, "horizon")
+
     rows = []
     for d in decisions:
         sym, rating, td = d["symbol"], d["rating"], d["trade_date"]
-        rec = {"symbol": sym, "rating": rating, "trade_date": td}
+        price_target, stop_loss = _extract_price_levels(d["final_decision"] or "")
+        rec = {"symbol": sym, "rating": rating, "trade_date": td,
+               "stop_loss": stop_loss, "price_target": price_target}
         for n in windows:
             r = _fwd_return(sym, td, n)
             b = _fwd_return("SPY", td, n)
             rec[f"r{n}"] = r
             rec[f"b{n}"] = b
             rec[f"a{n}"] = (r - b) if (r is not None and b is not None) else None
+            pit_r, pit_reason = _pit_return(sym, td, n, rating, stop_loss, price_target)
+            rec[f"pit_r{n}"] = pit_r
+            rec[f"pit_reason{n}"] = pit_reason
+            rec[f"pit_a{n}"] = (pit_r - b) if (pit_r is not None and b is not None) else None
         rows.append(rec)
 
     # Aggregate by rating. Bullish ratings should produce positive alpha;
@@ -3268,6 +3576,20 @@ def _compute_backtest(windows: list[int]) -> dict:
             agg[f"mean_r{n}"] = (sum(vals) / len(vals)) if vals else None
             agg[f"win_r{n}"] = (sum(1 for v in vals if v > 0) / len(vals)) if vals else None
             agg[f"mean_a{n}"] = (sum(alphas) / len(alphas)) if alphas else None
+
+            # PIT-adjusted aggregates: same shape, but using simulated-exit
+            # returns. Stop_pct / target_pct expose how often the strategy
+            # actually exited mid-horizon — high stop_pct means many losing
+            # trades got cut short (or stops are too tight).
+            pit_vals = [r[f"pit_r{n}"] for r in subset if r[f"pit_r{n}"] is not None]
+            pit_alphas = [r[f"pit_a{n}"] for r in subset if r[f"pit_a{n}"] is not None]
+            reasons = [r[f"pit_reason{n}"] for r in subset if r[f"pit_reason{n}"] is not None]
+            agg[f"pit_n{n}"] = len(pit_vals)
+            agg[f"pit_mean_r{n}"] = (sum(pit_vals) / len(pit_vals)) if pit_vals else None
+            agg[f"pit_win_r{n}"] = (sum(1 for v in pit_vals if v > 0) / len(pit_vals)) if pit_vals else None
+            agg[f"pit_mean_a{n}"] = (sum(pit_alphas) / len(pit_alphas)) if pit_alphas else None
+            agg[f"pit_stop_pct{n}"] = (sum(1 for x in reasons if x == "stop") / len(reasons)) if reasons else None
+            agg[f"pit_target_pct{n}"] = (sum(1 for x in reasons if x == "target") / len(reasons)) if reasons else None
         by_rating[rating] = agg
 
     # Bull − bear alpha spread = the headline number. Positive means
@@ -3407,6 +3729,50 @@ def alerts_view():
             "css": CSS, "items": items, "counts": counts, "total": len(items),
             "concentration": concentration,
         },
+    )
+
+
+_FACTORS_CACHE: dict[str, object] = {"key": None, "result": None}
+
+
+@app.get("/factors", response_class=HTMLResponse)
+def factors_view():
+    """Cross-sectional factor exposure: momentum / low-vol / size / value /
+    quality. Per-ticker raw values + z-scores, and dollar-weighted portfolio
+    tilts at the top. Cached hourly — fundamentals don't move intraday and
+    the underlying yfinance batch is non-trivial."""
+    import time as _time
+
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT p.symbol AS symbol,
+                   COALESCE(t.last_price, p.last_price) * p.quantity AS value
+            FROM positions_snapshot p
+            LEFT JOIN tickers t ON t.symbol = p.symbol
+            WHERE p.import_date = (SELECT MAX(import_date) FROM positions_snapshot)
+            """
+        ).fetchall()
+    ticker_total: dict[str, float] = {}
+    for r in rows:
+        v = r["value"] or 0
+        if v <= 0:
+            continue
+        ticker_total[r["symbol"]] = ticker_total.get(r["symbol"], 0) + v
+    portfolio_total = sum(ticker_total.values())
+    weights = {s: (v / portfolio_total) for s, v in ticker_total.items()} if portfolio_total else {}
+    symbols = sorted(ticker_total.keys())
+
+    cache_key = (tuple(symbols), int(_time.time() / 3600))
+    if _FACTORS_CACHE["key"] != cache_key:
+        _FACTORS_CACHE["result"] = _compute_factor_exposure(symbols, weights)
+        _FACTORS_CACHE["key"] = cache_key
+    fx = _FACTORS_CACHE["result"]
+    fx["as_of"] = date.today().isoformat()
+    fx["portfolio_total"] = portfolio_total
+
+    return templates.TemplateResponse(
+        _dummy_request(), "factors.html", {"css": CSS, "fx": fx},
     )
 
 

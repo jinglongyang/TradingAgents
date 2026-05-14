@@ -28,6 +28,7 @@
     <a class="btn secondary" href="/today">🎯 今日执行</a>
     <a class="btn secondary" href="/alerts">🚨 止损告警</a>
     <a class="btn secondary" href="/backtest">📊 回测</a>
+    <a class="btn secondary" href="/factors">🧮 因子</a>
     <a class="btn secondary" href="/correlation">🔗 相关性</a>
   </div>
 
@@ -44,6 +45,7 @@
         <th class="num" title="14d Wilder RSI · >70 超买 / <30 超卖">RSI14</th>
         <th class="num" title="MACD 柱状值 · 正=多头动能, 方向箭头看是否在加速">MACD</th>
         <th class="num" title="14d ATR / 价格 · 一倍 ATR 大致是日内典型波幅，止损距离参考">ATR%</th>
+        <th class="num" title="最近一季 EPS 实际 vs 预期。绿=beat / 红=miss。后面 4 字符 = 近 4 季的 B/M 序列（最新在左）">EPS</th>
         <th class="num">SMA50</th>
         <th class="num">SMA200</th>
         <th>趋势</th>
@@ -81,6 +83,18 @@
         </td>
         <td class="num" style="font-size:11px;color:var(--fg-muted);">
           {% if it.atr_pct is not none %}{{ "%.1f"|format(it.atr_pct) }}%{% else %}—{% endif %}
+        </td>
+        <td class="num" style="font-size:11px;" title="最新报告日 {{ it.last_eps_surprise_date or '—' }}">
+          {% if it.last_eps_surprise is not none %}
+            <span style="{% if it.last_eps_surprise > 0 %}color:var(--gain);{% else %}color:var(--loss);{% endif %}font-weight:600;">
+              {{ "%+.1f"|format(it.last_eps_surprise) }}%
+            </span>
+            {% if it.beat_streak %}
+              <div style="font-family:ui-monospace,monospace;font-size:10px;color:var(--fg-muted);letter-spacing:1px;">
+                {% for c in it.beat_streak %}<span style="{% if c == 'B' %}color:var(--gain);{% elif c == 'M' %}color:var(--loss);{% endif %}">{{ c }}</span>{% endfor %}
+              </div>
+            {% endif %}
+          {% else %}—{% endif %}
         </td>
         <td class="num">{% if it.sma50 %}${{ "%.2f"|format(it.sma50) }}{% else %}—{% endif %}</td>
         <td class="num">{% if it.sma200 %}${{ "%.2f"|format(it.sma200) }}{% else %}—{% endif %}</td>

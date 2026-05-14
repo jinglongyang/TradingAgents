@@ -154,9 +154,37 @@ def init_db(db_path: Path | None = None) -> Path:
             ("beta", "REAL"),
             ("earnings_date", "TEXT"),
             ("earnings_updated_at", "TEXT"),
+            # Value / quality fundamentals — populated by /enrich-tickers
+            # from yfinance Ticker.info. Some tickers (ETFs, unprofitable
+            # names) will have NULLs; the /factors page handles missing data.
+            ("pe_ratio", "REAL"),
+            ("pb_ratio", "REAL"),
+            ("roe", "REAL"),
+            ("debt_to_equity", "REAL"),
         ]:
             if col_name not in ticker_cols:
                 conn.execute(f"ALTER TABLE tickers ADD COLUMN {col_name} {col_type}")
+
+        # Quarterly earnings surprise history for the /tech and decision-detail
+        # views — actual EPS vs analyst consensus over the past ~2 years.
+        # Composite PK (symbol, report_date) lets the enrich worker upsert
+        # without duplicating rows when re-run.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS earnings_surprises (
+                symbol         TEXT NOT NULL,
+                report_date    TEXT NOT NULL,
+                eps_actual     REAL,
+                eps_estimate   REAL,
+                surprise_pct   REAL,
+                updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (symbol, report_date)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_earnings_surprises_symbol ON earnings_surprises (symbol, report_date DESC)"
+        )
 
         if "owner" not in cols:
             conn.execute("ALTER TABLE positions_snapshot ADD COLUMN owner TEXT")
