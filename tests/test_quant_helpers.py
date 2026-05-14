@@ -12,7 +12,11 @@ import math
 import pandas as pd
 import pytest
 
-import scripts.portfolio_server as ps
+import tradingagents.portfolio.quant as ps
+
+# Concentration aggregation lives in portfolio_server (it queries the DB),
+# kept separate from the pure-math quant module.
+import scripts.portfolio_server as portfolio_server
 
 
 # --------------------------------------------------------------------------
@@ -345,8 +349,8 @@ class TestConcentrationBreaches:
             {"symbol": "SMALL2", "account_id": "a1", "account_name": "A", "owner": "Self", "value": 5_000,  "sector": "Health"},
         ]
         # Total 40k. BIG = 75% (breach @10), SMALLs = 12.5% each (breach @10).
-        monkeypatch.setattr(ps, "connect", self._stub_connect(rows))
-        out = ps._compute_concentration_breaches()
+        monkeypatch.setattr(portfolio_server, "connect", self._stub_connect(rows))
+        out = portfolio_server._compute_concentration_breaches()
         names = {b["name"] for b in out["ticker"]}
         assert names == {"BIG", "SMALL1", "SMALL2"}
         # Sorted by overshoot desc.
@@ -360,15 +364,15 @@ class TestConcentrationBreaches:
             {"symbol": "SMALL1", "account_id": "a1", "account_name": "A", "owner": "Self", "value": 5_000,  "sector": "Tech"},
             {"symbol": "DEF",    "account_id": "a1", "account_name": "A", "owner": "Self", "value": 5_000,  "sector": "Defense"},
         ]
-        monkeypatch.setattr(ps, "connect", self._stub_connect(rows))
-        out = ps._compute_concentration_breaches()
+        monkeypatch.setattr(portfolio_server, "connect", self._stub_connect(rows))
+        out = portfolio_server._compute_concentration_breaches()
         assert len(out["sector"]) == 1
         assert out["sector"][0]["name"] == "Tech"
         assert out["sector"][0]["pct"] == pytest.approx(87.5)
 
     def test_empty_snapshot_returns_empty_buckets(self, monkeypatch):
-        monkeypatch.setattr(ps, "connect", self._stub_connect([]))
-        out = ps._compute_concentration_breaches()
+        monkeypatch.setattr(portfolio_server, "connect", self._stub_connect([]))
+        out = portfolio_server._compute_concentration_breaches()
         assert out == {"ticker": [], "sector": [], "owner": [], "total": 0}
 
     def test_owner_breach_when_one_owner_holds_most(self, monkeypatch):
@@ -376,8 +380,8 @@ class TestConcentrationBreaches:
             {"symbol": "A", "account_id": "a1", "account_name": "Self acct",   "owner": "Self",   "value": 85_000, "sector": "Tech"},
             {"symbol": "B", "account_id": "a2", "account_name": "Spouse acct", "owner": "Spouse", "value": 15_000, "sector": "Tech"},
         ]
-        monkeypatch.setattr(ps, "connect", self._stub_connect(rows))
-        out = ps._compute_concentration_breaches()
+        monkeypatch.setattr(portfolio_server, "connect", self._stub_connect(rows))
+        out = portfolio_server._compute_concentration_breaches()
         # Tech sector = 100% > 35% → also breaches sector.
         assert out["owner"][0]["name"] == "Self"
         assert out["owner"][0]["pct"] == pytest.approx(85.0)
