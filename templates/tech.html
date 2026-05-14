@@ -23,23 +23,35 @@
     </span>
   </div>
 
-  <div style="margin-bottom:14px;font-size:12px;">
-    <span style="color:var(--fg-muted);margin-right:8px;">LLM 分层路由：</span>
-    <span class="tag" style="background:#ef4444;color:white;padding:3px 9px;font-size:11px;margin-right:4px;" title="Full pipeline — earnings imminent / near stop / climax / transition zone">
-      🔴 Full: {{ tech.tier_counts.full }}
-    </span>
-    <span class="tag" style="background:#f59e0b;color:white;padding:3px 9px;font-size:11px;margin-right:4px;" title="Single-prompt confirmation — trend clean, decision stale">
-      🟡 Light: {{ tech.tier_counts.light }}
-    </span>
-    <span class="tag" style="background:#22c55e;color:white;padding:3px 9px;font-size:11px;margin-right:8px;" title="Carry-forward — trend clear, decision fresh, no signals">
-      🟢 Skip: {{ tech.tier_counts.skip }}
-    </span>
-    <span style="color:var(--fg-muted);margin-left:12px;">Stage:</span>
-    {% for stage_name, n in tech.stage_counts.items() %}
-      {% if n %}
-      <span style="font-size:11px;color:var(--fg-muted);margin-left:6px;">{{ stage_name }}: {{ n }}</span>
-      {% endif %}
-    {% endfor %}
+  <div style="background:var(--bg-subtle);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;">
+    <div style="margin-bottom:6px;">
+      <span style="font-weight:600;margin-right:8px;">LLM 分层路由（PR1 预览，未接到 analyze_holdings）</span>
+      <span class="tag" style="background:#ef4444;color:white;padding:3px 9px;font-size:11px;margin-right:4px;">
+        🔴 Full: {{ tech.tier_counts.full }}
+      </span>
+      <span class="tag" style="background:#f59e0b;color:white;padding:3px 9px;font-size:11px;margin-right:4px;">
+        🟡 Light: {{ tech.tier_counts.light }}
+      </span>
+      <span class="tag" style="background:#22c55e;color:white;padding:3px 9px;font-size:11px;margin-right:8px;">
+        🟢 Skip: {{ tech.tier_counts.skip }}
+      </span>
+    </div>
+    <div style="color:var(--fg-muted);font-size:11px;line-height:1.6;">
+      🔴 <strong>Full</strong> = 跑完整 multi-agent pipeline · 触发条件：财报 ≤7d / 临近止损 / climax run / 形态转折 (Stage 1/3 或 unknown) / 波动收缩 + 上升趋势<br>
+      🟡 <strong>Light</strong> = 单 prompt 验证（仅确认 thesis 是否仍成立）· 触发条件：趋势清晰 (Stage 2/4) 但上次决策 >7d<br>
+      🟢 <strong>Skip</strong> = 直接复用上次评级，不跑 LLM · 触发条件：趋势清晰 (Stage 2/4) + 决策 ≤7d + 无紧急信号
+    </div>
+    <div style="color:var(--fg-muted);font-size:11px;margin-top:6px;">
+      <strong>Stage</strong>: 1=底部盘整，2=上升趋势，3=见顶，4=下行趋势 (Weinstein 四阶段)。
+      {% for stage_name, n in tech.stage_counts.items() %}
+        {% if n %}
+        <span style="margin-left:6px;">{{ stage_name }}: {{ n }}</span>
+        {% endif %}
+      {% endfor %}
+    </div>
+    <div style="color:var(--fg-muted);font-size:11px;margin-top:6px;">
+      <strong>信号</strong>: 🚀 = climax run (RSI>80 + 5d涨幅>25%)，🔒 = 波动率收缩 (VCP base 末期)，📈 = 距 52w 高 ≤3%
+    </div>
   </div>
 
   <div style="margin-bottom:16px;">
