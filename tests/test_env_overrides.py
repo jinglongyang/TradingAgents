@@ -9,9 +9,18 @@ import pytest
 import tradingagents.default_config as default_config_module
 
 
+_LEGACY_LLM_ENV_VARS = ("LLM_PROVIDER", "DEEP_THINK_LLM", "QUICK_THINK_LLM")
+
+
 def _reload_with_env(monkeypatch, **overrides):
-    """Set/clear env vars then reload default_config to re-evaluate DEFAULT_CONFIG."""
+    """Set/clear env vars then reload default_config to re-evaluate DEFAULT_CONFIG.
+
+    Also clears the legacy unprefixed LLM_* vars so tests that assert defaults
+    don't accidentally pick up the developer's local .env (e.g. an Azure
+    provider override leaking into the suite)."""
     for key in list(default_config_module._ENV_OVERRIDES):
+        monkeypatch.delenv(key, raising=False)
+    for key in _LEGACY_LLM_ENV_VARS:
         monkeypatch.delenv(key, raising=False)
     for key, val in overrides.items():
         monkeypatch.setenv(key, val)
