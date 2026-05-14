@@ -107,13 +107,20 @@ def _write_positions(
     updated = 0
     with connect(db_path) as conn:
         for pos in positions:
+            # Owner is user-assigned and not in the broker CSV. Inherit it from
+            # the most recent prior row for this account so re-imports on a
+            # new import_date don't blank it out. ON CONFLICT path doesn't
+            # touch owner, so this only fires for fresh inserts.
             cur = conn.execute(
                 """
                 INSERT INTO positions_snapshot (
                     import_date, statement_date, account_id, account_name, account_type,
                     symbol, quantity, last_price, current_value, cost_basis_total, avg_cost,
-                    broker
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    broker, owner
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    (SELECT owner FROM positions_snapshot
+                     WHERE account_id = ? AND owner IS NOT NULL
+                     ORDER BY import_date DESC LIMIT 1))
                 ON CONFLICT(import_date, account_id, symbol) DO UPDATE SET
                     quantity         = excluded.quantity,
                     last_price       = excluded.last_price,
@@ -128,6 +135,7 @@ def _write_positions(
                     pos.account_id, pos.account_name, pos.account_type.value,
                     pos.symbol, pos.quantity, pos.last_price, pos.current_value,
                     pos.cost_basis_total, pos.avg_cost, pos.broker,
+                    pos.account_id,
                 ),
             )
             if cur.rowcount == 1:
@@ -173,11 +181,11 @@ def carry_forward_snapshot(
             INSERT INTO positions_snapshot (
                 import_date, statement_date, account_id, account_name, account_type,
                 symbol, quantity, last_price, current_value, cost_basis_total, avg_cost,
-                broker
+                broker, owner
             )
             SELECT ?, statement_date, account_id, account_name, account_type,
                    symbol, quantity, last_price, current_value, cost_basis_total, avg_cost,
-                   broker
+                   broker, owner
             FROM positions_snapshot
             WHERE import_date = ?
             """,
