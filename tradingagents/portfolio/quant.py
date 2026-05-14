@@ -18,6 +18,7 @@ Public surface (used by tests + portfolio_server):
     Momentum   : _compute_momentum_12_1
     Indicators : _compute_rsi, _compute_macd, _compute_atr
     Calibration: _compute_rating_calibration, _rank_with_ties
+    Routing    : _classify_stage, _route_tier
 """
 
 from __future__ import annotations
@@ -393,6 +394,145 @@ def _compute_macd(close: "pd.Series") -> dict | None:
         "hist": last,
         "prev_hist": float(hist.iloc[-2]) if len(hist) > 1 else None,
     }
+
+
+def _classify_stage(close: "pd.Series", rsi: float | None = None, atr_pct: float | None = None) -> dict:
+    """Weinstein four-stage classification + signal flags.
+
+    Inputs are a close-price series long enough to compute SMA200 and 30d
+    slopes. RSI and ATR% are optional inputs the caller already has from the
+    same fetch — passing them in keeps this pure (no fetch side-effects).
+
+    Stages (loose Weinstein definitions, adapted for daily bars):
+      stage2_uptrend  : price > 50SMA > 200SMA AND 200SMA rising
+      stage4_decline  : price < 50SMA < 200SMA AND 200SMA falling
+      stage3_topping  : price > 200SMA but 50SMA flat/below 200SMA (deceleration)
+      stage1_basing   : price < 200SMA but 200SMA flat (transition out of stage 4)
+      unknown         : not enough history or mixed signals
+
+    Signals returned alongside the stage are condition flags the tier router
+    consumes — they describe state of the bar, not the stage itself.
+    """
+    if close is None or len(close) < 60:
+        return {"stage": "unknown", "signals": [], "details": {}}
+
+    price = float(close.iloc[-1])
+    sma50 = float(close.tail(50).mean()) if len(close) >= 50 else None
+    sma200 = float(close.tail(200).mean()) if len(close) >= 200 else None
+
+    # 30-day slope of SMA200 → trend direction. Rising/falling threshold is
+    # ±0.5% over 30 trading days (≈1.5 months); tighter would call noise as
+    # signal, looser would miss real stage transitions.
+    sma200_slope_pct: float | None = None
+    if sma200 is not None and len(close) >= 230:
+        sma200_30d_ago = float(close.iloc[-30:-30 + 1].rolling(200).mean().iloc[-1]) if False else None
+        # Simpler: rolling SMA200 series, current vs 30 days back.
+        sma200_series = close.rolling(200).mean().dropna()
+        if len(sma200_series) >= 31:
+            now = float(sma200_series.iloc[-1])
+            then = float(sma200_series.iloc[-31])
+            if then > 0:
+                sma200_slope_pct = (now - then) / then * 100
+
+    stage = "unknown"
+    if sma50 is not None and sma200 is not None and sma200_slope_pct is not None:
+        if price > sma50 > sma200 and sma200_slope_pct > 0.5:
+            stage = "stage2_uptrend"
+        elif price < sma50 < sma200 and sma200_slope_pct < -0.5:
+            stage = "stage4_decline"
+        elif price > sma200 and (sma50 <= sma200 or sma200_slope_pct <= 0.5):
+            stage = "stage3_topping"
+        elif price < sma200 and abs(sma200_slope_pct) < 1.0:
+            stage = "stage1_basing"
+        else:
+            # Mixed configurations — neither cleanly trending nor consolidating.
+            stage = "unknown"
+
+    signals: list[str] = []
+
+    # Climax run: RSI > 80 AND last 5 bars compounded > 25%. Either alone is
+    # noisy; the combination is the textbook "blow-off" cue.
+    if rsi is not None and rsi > 80 and len(close) >= 6:
+        last5 = float(close.iloc[-1] / close.iloc[-6] - 1)
+        if last5 > 0.25:
+            signals.append("climax_run")
+
+    # ATR contraction: today's ATR% is at or below the 30th percentile of the
+    # last 60 days. A telltale of imminent breakout / breakdown (volatility
+    # compression precedes expansion).
+    if atr_pct is not None and len(close) >= 60:
+        # We don't have ATR series here; proxy with rolling 5d stdev of returns.
+        rets = close.pct_change().dropna()
+        if len(rets) >= 60:
+            recent_vol = float(rets.tail(5).std())
+            past_60_vol_30pct = float(rets.tail(60).std() * 0.7)  # 30% below median ≈ contracting
+            if recent_vol > 0 and recent_vol < past_60_vol_30pct:
+                signals.append("volatility_contraction")
+
+    # Near-52w-high (within 3%) — common breakout zone, often paired with VCP.
+    if len(close) >= 200:
+        window = close.tail(252) if len(close) >= 252 else close
+        w_high = float(window.max())
+        if w_high > 0 and (price / w_high) >= 0.97:
+            signals.append("near_52w_high")
+
+    return {
+        "stage": stage,
+        "signals": signals,
+        "details": {
+            "price": price,
+            "sma50": sma50,
+            "sma200": sma200,
+            "sma200_slope_pct": sma200_slope_pct,
+        },
+    }
+
+
+def _route_tier(
+    stage_info: dict,
+    last_decision_age_days: int | None,
+    earnings_in_days: int | None,
+    near_stop: bool = False,
+    fresh_threshold_days: int = 7,
+) -> dict:
+    """Decide how much LLM compute to spend on this ticker.
+
+    Returns {tier, reason}. Tiers:
+      "full"  → run the multi-agent pipeline. Required when something time-
+                sensitive is happening (earnings imminent, stop_loss close,
+                climax/blow-off in progress, or stage transition unclear).
+      "light" → run a single-prompt confirmation. The ticker is in a clean
+                uptrend/downtrend, last decision was recent, but we still
+                want a sanity check.
+      "skip"  → carry forward the most recent rating. The trend is clear,
+                the decision is fresh, no signals indicate a change.
+
+    Defaults bias toward "full" on missing data so we don't silently skip
+    something we haven't measured."""
+    stage = stage_info.get("stage", "unknown")
+    signals = set(stage_info.get("signals", []))
+
+    if near_stop:
+        return {"tier": "full", "reason": "near_stop"}
+    if earnings_in_days is not None and 0 <= earnings_in_days <= 7:
+        return {"tier": "full", "reason": "earnings_in_7d"}
+    if "climax_run" in signals:
+        return {"tier": "full", "reason": "climax_run"}
+    if "volatility_contraction" in signals and stage == "stage2_uptrend":
+        return {"tier": "full", "reason": "near_breakout"}
+
+    if stage == "unknown":
+        return {"tier": "full", "reason": "stage_unknown"}
+
+    is_fresh = last_decision_age_days is not None and last_decision_age_days <= fresh_threshold_days
+    clean_trend = stage in ("stage2_uptrend", "stage4_decline")
+
+    if is_fresh and clean_trend:
+        return {"tier": "skip", "reason": f"fresh_decision({last_decision_age_days}d)+{stage}"}
+    if clean_trend:
+        return {"tier": "light", "reason": f"clean_trend({stage})_stale_decision"}
+    # stage1_basing or stage3_topping → ambiguous, want LLM judgment
+    return {"tier": "full", "reason": f"transition_zone({stage})"}
 
 
 def _compute_atr(high: "pd.Series", low: "pd.Series", close: "pd.Series", n: int = 14) -> float | None:

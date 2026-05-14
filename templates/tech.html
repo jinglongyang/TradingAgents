@@ -23,6 +23,25 @@
     </span>
   </div>
 
+  <div style="margin-bottom:14px;font-size:12px;">
+    <span style="color:var(--fg-muted);margin-right:8px;">LLM 分层路由：</span>
+    <span class="tag" style="background:#ef4444;color:white;padding:3px 9px;font-size:11px;margin-right:4px;" title="Full pipeline — earnings imminent / near stop / climax / transition zone">
+      🔴 Full: {{ tech.tier_counts.full }}
+    </span>
+    <span class="tag" style="background:#f59e0b;color:white;padding:3px 9px;font-size:11px;margin-right:4px;" title="Single-prompt confirmation — trend clean, decision stale">
+      🟡 Light: {{ tech.tier_counts.light }}
+    </span>
+    <span class="tag" style="background:#22c55e;color:white;padding:3px 9px;font-size:11px;margin-right:8px;" title="Carry-forward — trend clear, decision fresh, no signals">
+      🟢 Skip: {{ tech.tier_counts.skip }}
+    </span>
+    <span style="color:var(--fg-muted);margin-left:12px;">Stage:</span>
+    {% for stage_name, n in tech.stage_counts.items() %}
+      {% if n %}
+      <span style="font-size:11px;color:var(--fg-muted);margin-left:6px;">{{ stage_name }}: {{ n }}</span>
+      {% endif %}
+    {% endfor %}
+  </div>
+
   <div style="margin-bottom:16px;">
     <a class="btn secondary" href="/">← 回到持仓</a>
     <a class="btn secondary" href="/today">🎯 今日执行</a>
@@ -41,6 +60,8 @@
       <tr>
         <th>Ticker</th>
         <th>评级</th>
+        <th title="Weinstein 阶段：2=上升趋势, 4=下行, 1=底部盘整, 3=见顶">Stage</th>
+        <th title="LLM 路由建议：Full=完整 agents, Light=单 prompt, Skip=直接复用">Tier</th>
         <th class="num">价格</th>
         <th class="num" title="14d Wilder RSI · >70 超买 / <30 超卖">RSI14</th>
         <th class="num" title="MACD 柱状值 · 正=多头动能, 方向箭头看是否在加速">MACD</th>
@@ -62,6 +83,29 @@
       <tr style="{% if it.conflict %}background:rgba(161,98,7,0.10);{% elif it.trend == 'death' %}background:rgba(239,68,68,0.05);{% elif it.trend == 'golden' %}background:rgba(16,185,129,0.04);{% endif %}">
         <td><strong>{{ it.symbol }}</strong></td>
         <td>{% if it.rating %}<span class="tag tag-{{ it.rating|lower }}" style="padding:2px 8px;font-size:11px;">{{ it.rating }}</span>{% else %}—{% endif %}</td>
+        <td style="font-size:11px;">
+          {% if it.stage == 'stage2_uptrend' %}<span style="color:var(--gain);font-weight:600;">2 ↑</span>
+          {% elif it.stage == 'stage4_decline' %}<span style="color:var(--loss);font-weight:600;">4 ↓</span>
+          {% elif it.stage == 'stage1_basing' %}<span style="color:#f59e0b;">1 ⏸</span>
+          {% elif it.stage == 'stage3_topping' %}<span style="color:#a16207;">3 ⚠</span>
+          {% else %}<span style="color:var(--fg-muted);">—</span>{% endif %}
+          {% if it.stage_signals %}
+            <div style="font-size:10px;color:var(--fg-muted);">
+              {% for s in it.stage_signals %}
+                {% if s == 'climax_run' %}🚀
+                {% elif s == 'volatility_contraction' %}🔒
+                {% elif s == 'near_52w_high' %}📈
+                {% endif %}
+              {% endfor %}
+            </div>
+          {% endif %}
+        </td>
+        <td style="font-size:11px;" title="{{ it.tier_reason }}">
+          {% if it.tier == 'full' %}<span style="background:#ef4444;color:white;padding:2px 6px;border-radius:3px;font-weight:600;">🔴 F</span>
+          {% elif it.tier == 'light' %}<span style="background:#f59e0b;color:white;padding:2px 6px;border-radius:3px;font-weight:600;">🟡 L</span>
+          {% elif it.tier == 'skip' %}<span style="background:#22c55e;color:white;padding:2px 6px;border-radius:3px;font-weight:600;">🟢 S</span>
+          {% else %}—{% endif %}
+        </td>
         <td class="num">${{ "%.2f"|format(it.price) }}</td>
         <td class="num" style="{% if it.rsi_zone == 'overbought' %}color:var(--loss);font-weight:600;{% elif it.rsi_zone == 'oversold' %}color:var(--gain);font-weight:600;{% endif %}">
           {% if it.rsi is not none %}

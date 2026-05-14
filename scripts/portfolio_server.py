@@ -2682,6 +2682,8 @@ from tradingagents.portfolio.quant import (  # noqa: E402
     _compute_rsi,
     _compute_macd,
     _compute_atr,
+    _classify_stage,
+    _route_tier,
 )
 
 
@@ -2889,6 +2891,44 @@ def _compute_technicals() -> dict:
     for r in surprise_rows:
         surprises_by_sym.setdefault(r["symbol"], []).append(dict(r))
 
+    # Pull earnings_date + last decision final_decision for tier-routing inputs.
+    # Earnings days = days until next reported date; latest decision for stop
+    # proximity and freshness gating.
+    with connect() as conn:
+        ed_rows = conn.execute("SELECT symbol, earnings_date FROM tickers").fetchall()
+        decision_meta_rows = conn.execute(
+            """
+            WITH latest AS (
+                SELECT symbol, MAX(trade_date) AS d FROM decisions GROUP BY symbol
+            )
+            SELECT d.symbol, d.trade_date, d.final_decision FROM decisions d
+            JOIN latest l ON l.symbol = d.symbol AND l.d = d.trade_date
+            """
+        ).fetchall()
+    from datetime import datetime as _dt
+    today = _date.today()
+    earnings_in_days_by_sym: dict[str, int | None] = {}
+    for r in ed_rows:
+        if not r["earnings_date"]:
+            earnings_in_days_by_sym[r["symbol"]] = None
+            continue
+        try:
+            ed = _dt.strptime(r["earnings_date"], "%Y-%m-%d").date()
+            earnings_in_days_by_sym[r["symbol"]] = (ed - today).days
+        except ValueError:
+            earnings_in_days_by_sym[r["symbol"]] = None
+    decision_meta_by_sym: dict[str, dict] = {}
+    for r in decision_meta_rows:
+        try:
+            td = _dt.strptime(r["trade_date"], "%Y-%m-%d").date()
+            age = (today - td).days
+        except (ValueError, TypeError):
+            age = None
+        decision_meta_by_sym[r["symbol"]] = {
+            "age_days": age,
+            "final_decision": r["final_decision"] or "",
+        }
+
     if not symbols:
         return {"rows": [], "as_of": _date.today().isoformat()}
 
@@ -2983,6 +3023,27 @@ def _compute_technicals() -> dict:
         if sym in high_df.columns and sym in low_df.columns:
             atr = _compute_atr(high_df[sym].dropna(), low_df[sym].dropna(), col)
             atr_pct = (atr / price * 100) if (atr is not None and price > 0) else None
+
+        # Stage classification + tier routing — PR 1 surfaces these so the user
+        # can eyeball assignments before we wire them into analyze_holdings.py.
+        stage_info = _classify_stage(col, rsi=rsi, atr_pct=atr_pct)
+        meta = decision_meta_by_sym.get(sym, {})
+        # near_stop = current price within 5% of latest decision's stop_loss.
+        near_stop = False
+        if meta.get("final_decision"):
+            _pt, _sl = _extract_price_levels(meta["final_decision"])
+            if _sl and price > 0:
+                # Bull thesis: stop is below; close gap means trouble. Bear:
+                # stop is above; close gap also means trouble. Use abs distance.
+                dist_pct = abs((price - _sl) / price * 100)
+                near_stop = dist_pct < 5.0
+        tier_info = _route_tier(
+            stage_info,
+            last_decision_age_days=meta.get("age_days"),
+            earnings_in_days=earnings_in_days_by_sym.get(sym),
+            near_stop=near_stop,
+        )
+
         macd_direction = None
         if macd is not None:
             if macd["prev_hist"] is None:
@@ -3016,6 +3077,13 @@ def _compute_technicals() -> dict:
             "last_eps_surprise_date": last_surprise_date,
             "beat_streak": beat_streak,
             "n_surprises": len(surprises),
+            "stage": stage_info["stage"],
+            "stage_signals": stage_info["signals"],
+            "tier": tier_info["tier"],
+            "tier_reason": tier_info["reason"],
+            "near_stop": near_stop,
+            "earnings_in_days_router": earnings_in_days_by_sym.get(sym),
+            "last_decision_age_days": meta.get("age_days"),
             "cross_days": cross_days,
             "w52_high": w_high,
             "w52_low": w_low,
@@ -3040,10 +3108,20 @@ def _compute_technicals() -> dict:
         "death": sum(1 for x in rows if x["trend"] == "death"),
         "conflict": sum(1 for x in rows if x["conflict"]),
     }
+    tier_counts = {
+        "full": sum(1 for x in rows if x.get("tier") == "full"),
+        "light": sum(1 for x in rows if x.get("tier") == "light"),
+        "skip": sum(1 for x in rows if x.get("tier") == "skip"),
+    }
+    stage_counts: dict[str, int] = {}
+    for x in rows:
+        stage_counts[x.get("stage", "unknown")] = stage_counts.get(x.get("stage", "unknown"), 0) + 1
 
     return {
         "rows": rows,
         "counts": counts,
+        "tier_counts": tier_counts,
+        "stage_counts": stage_counts,
         "as_of": _date.today().isoformat(),
     }
 

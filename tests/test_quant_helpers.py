@@ -389,6 +389,87 @@ class TestConcentrationBreaches:
 
 
 # --------------------------------------------------------------------------
+# _classify_stage / _route_tier — Weinstein stage classification + LLM
+# tier routing. Pure functions on a close-price series + a few flags.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestClassifyStage:
+    @staticmethod
+    def _series(values: list[float]) -> pd.Series:
+        idx = pd.date_range("2024-01-02", periods=len(values), freq="B")
+        return pd.Series(values, index=idx)
+
+    def test_uptrend_classified_as_stage_2(self):
+        # 250 days of steady +0.3%/day → price > 50SMA > 200SMA, both rising.
+        close = self._series([100 * (1.003 ** i) for i in range(250)])
+        out = ps._classify_stage(close)
+        assert out["stage"] == "stage2_uptrend"
+        assert "near_52w_high" in out["signals"]
+
+    def test_downtrend_classified_as_stage_4(self):
+        # 250 days of -0.3%/day → price < 50SMA < 200SMA, both falling.
+        close = self._series([100 * (0.997 ** i) for i in range(250)])
+        out = ps._classify_stage(close)
+        assert out["stage"] == "stage4_decline"
+
+    def test_too_short_returns_unknown(self):
+        out = ps._classify_stage(self._series([100.0] * 30))
+        assert out["stage"] == "unknown"
+        assert out["signals"] == []
+
+    def test_climax_run_signal_fires(self):
+        # Long boring history, then 5 bars of explosive growth → RSI peaks
+        # and 5-bar return >25%.
+        base = [100.0] * 245
+        spike = [100 * 1.08, 100 * 1.16, 100 * 1.25, 100 * 1.34, 100 * 1.44]
+        close = self._series(base + spike)
+        out = ps._classify_stage(close, rsi=88.0, atr_pct=2.0)
+        assert "climax_run" in out["signals"]
+
+
+@pytest.mark.unit
+class TestRouteTier:
+    @staticmethod
+    def _stage(stage: str = "stage2_uptrend", signals: list[str] | None = None) -> dict:
+        return {"stage": stage, "signals": signals or [], "details": {}}
+
+    def test_earnings_window_forces_full(self):
+        out = ps._route_tier(self._stage(), last_decision_age_days=2, earnings_in_days=3)
+        assert out["tier"] == "full"
+        assert out["reason"] == "earnings_in_7d"
+
+    def test_near_stop_forces_full(self):
+        out = ps._route_tier(self._stage(), last_decision_age_days=2, earnings_in_days=None, near_stop=True)
+        assert out["tier"] == "full"
+        assert out["reason"] == "near_stop"
+
+    def test_climax_forces_full(self):
+        out = ps._route_tier(self._stage(signals=["climax_run"]), last_decision_age_days=2, earnings_in_days=None)
+        assert out["tier"] == "full"
+
+    def test_unknown_stage_forces_full_for_safety(self):
+        out = ps._route_tier(self._stage(stage="unknown"), last_decision_age_days=2, earnings_in_days=None)
+        assert out["tier"] == "full"
+
+    def test_fresh_decision_clean_uptrend_skips(self):
+        out = ps._route_tier(self._stage(), last_decision_age_days=3, earnings_in_days=None)
+        assert out["tier"] == "skip"
+        assert "fresh_decision" in out["reason"]
+        assert "stage2_uptrend" in out["reason"]
+
+    def test_stale_decision_clean_trend_uses_light(self):
+        out = ps._route_tier(self._stage(stage="stage4_decline"), last_decision_age_days=20, earnings_in_days=None)
+        assert out["tier"] == "light"
+
+    def test_topping_transition_forces_full(self):
+        out = ps._route_tier(self._stage(stage="stage3_topping"), last_decision_age_days=3, earnings_in_days=None)
+        assert out["tier"] == "full"
+        assert "transition_zone" in out["reason"]
+
+
+# --------------------------------------------------------------------------
 # _compute_momentum_12_1 — 12-1m compounded return, skipping the last 21
 # trading days to dodge short-term reversal.
 # --------------------------------------------------------------------------
