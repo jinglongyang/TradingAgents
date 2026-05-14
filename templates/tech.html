@@ -11,30 +11,49 @@
 
   <div class="status" style="margin-bottom:14px;">
     {% if tech.counts.conflict %}
-      <span class="tag" style="background:#a16207;color:white;padding:4px 10px;font-size:12px;margin-right:6px;">
-        ⚠️ 评级 vs 趋势冲突: {{ tech.counts.conflict }}
-      </span>
+      <a href="/tech?filter=conflict" style="text-decoration:none;">
+        <span class="tag" style="background:#a16207;color:white;padding:4px 10px;font-size:12px;margin-right:6px;cursor:pointer;">
+          ⚠️ 评级 vs 趋势冲突: {{ tech.counts.conflict }}
+        </span>
+      </a>
     {% endif %}
-    <span class="tag" style="background:var(--gain);color:white;padding:4px 10px;font-size:12px;margin-right:6px;">
-      🌟 金叉: {{ tech.counts.golden }}
-    </span>
-    <span class="tag" style="background:var(--loss);color:white;padding:4px 10px;font-size:12px;margin-right:6px;">
-      💀 死叉: {{ tech.counts.death }}
-    </span>
+    <a href="/tech?filter=golden" style="text-decoration:none;">
+      <span class="tag" style="background:var(--gain);color:white;padding:4px 10px;font-size:12px;margin-right:6px;cursor:pointer;">
+        🌟 金叉: {{ tech.counts.golden }}
+      </span>
+    </a>
+    <a href="/tech?filter=death" style="text-decoration:none;">
+      <span class="tag" style="background:var(--loss);color:white;padding:4px 10px;font-size:12px;margin-right:6px;cursor:pointer;">
+        💀 死叉: {{ tech.counts.death }}
+      </span>
+    </a>
+    {% if tech.active_filter %}
+      <a href="/tech" style="text-decoration:none;margin-left:8px;">
+        <span class="tag" style="background:var(--bg);border:1px solid var(--border);color:var(--fg-muted);padding:4px 10px;font-size:12px;cursor:pointer;">
+          ✕ 清除过滤 ({{ tech.active_filter }} · {{ tech.filtered_count }} 行)
+        </span>
+      </a>
+    {% endif %}
   </div>
 
   <div style="background:var(--bg-subtle);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;">
     <div style="margin-bottom:6px;">
       <span style="font-weight:600;margin-right:8px;">LLM 分层路由（PR1 预览，未接到 analyze_holdings）</span>
-      <span class="tag" style="background:#ef4444;color:white;padding:3px 9px;font-size:11px;margin-right:4px;">
-        🔴 Full: {{ tech.tier_counts.full }}
-      </span>
-      <span class="tag" style="background:#f59e0b;color:white;padding:3px 9px;font-size:11px;margin-right:4px;">
-        🟡 Light: {{ tech.tier_counts.light }}
-      </span>
-      <span class="tag" style="background:#22c55e;color:white;padding:3px 9px;font-size:11px;margin-right:8px;">
-        🟢 Skip: {{ tech.tier_counts.skip }}
-      </span>
+      <a href="/tech?filter=tier_full" style="text-decoration:none;">
+        <span class="tag" style="background:#ef4444;color:white;padding:3px 9px;font-size:11px;margin-right:4px;cursor:pointer;">
+          🔴 Full: {{ tech.tier_counts.full }}
+        </span>
+      </a>
+      <a href="/tech?filter=tier_light" style="text-decoration:none;">
+        <span class="tag" style="background:#f59e0b;color:white;padding:3px 9px;font-size:11px;margin-right:4px;cursor:pointer;">
+          🟡 Light: {{ tech.tier_counts.light }}
+        </span>
+      </a>
+      <a href="/tech?filter=tier_skip" style="text-decoration:none;">
+        <span class="tag" style="background:#22c55e;color:white;padding:3px 9px;font-size:11px;margin-right:8px;cursor:pointer;">
+          🟢 Skip: {{ tech.tier_counts.skip }}
+        </span>
+      </a>
     </div>
     <div style="color:var(--fg-muted);font-size:11px;line-height:1.6;">
       🔴 <strong>Full</strong> = 跑完整 multi-agent pipeline · 触发条件：财报 ≤7d / 临近止损 / climax run / 形态转折 (Stage 1/3 或 unknown) / 波动收缩 + 上升趋势<br>

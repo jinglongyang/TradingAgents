@@ -3127,14 +3127,35 @@ def _compute_technicals() -> dict:
 
 
 @app.get("/tech", response_class=HTMLResponse)
-def tech_view():
-    """Technical-analysis snapshot per ticker, joined to latest PM rating."""
+def tech_view(filter: str = ""):
+    """Technical-analysis snapshot per ticker, joined to latest PM rating.
+
+    ``filter`` lets the user narrow the table without recomputing the cache:
+      conflict — only rows where PM rating disagrees with SMA trend
+      death    — only death-cross rows
+      golden   — only golden-cross rows
+      stage{n} — only that Weinstein stage
+      tier_{full|light|skip} — only that tier"""
     import time as _time
+    import copy as _copy
     cache_key = int(_time.time() / 3600)
     if _TECH_CACHE["key"] != cache_key:
         _TECH_CACHE["result"] = _compute_technicals()
         _TECH_CACHE["key"] = cache_key
-    tech = _TECH_CACHE["result"]
+    tech = _copy.copy(_TECH_CACHE["result"])  # shallow copy so filter mutation doesn't pollute cache
+
+    if filter:
+        rows = tech.get("rows", [])
+        if filter == "conflict":
+            rows = [r for r in rows if r.get("conflict")]
+        elif filter in ("golden", "death"):
+            rows = [r for r in rows if r.get("trend") == filter]
+        elif filter.startswith("stage"):
+            rows = [r for r in rows if r.get("stage") == filter]
+        elif filter.startswith("tier_"):
+            t = filter.split("_", 1)[1]
+            rows = [r for r in rows if r.get("tier") == t]
+        tech = {**tech, "rows": rows, "active_filter": filter, "filtered_count": len(rows)}
 
     return templates.TemplateResponse(
         _dummy_request(), "tech.html",
